@@ -142,9 +142,9 @@ func TransferPlaybackInfo(c *gin.Context) {
 			return nil
 		}
 
+		// 转码功能已禁用
 		// 添加转码 MediaSource 获取
-		cfg := config.C.VideoPreview
-		if !msInfo.Empty || !cfg.Enable || !cfg.ContainerValid(source.Attr("Container").Val().(string)) {
+		if true {
 			return nil
 		}
 		resChan := make(chan []*jsons.Item, 1)
@@ -395,10 +395,9 @@ func LoadCacheItems(c *gin.Context) {
 		jsons.OkResp(c.Writer, resJson)
 	}()
 
+	// 转码功能已禁用
 	// 未开启转码资源获取功能
-	if !config.C.VideoPreview.Enable {
-		return
-	}
+	return
 
 	// 只处理特定类型的 Items 响应
 	itemType, _ := resJson.Attr("Type").String()

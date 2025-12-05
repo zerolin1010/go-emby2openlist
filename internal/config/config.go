@@ -13,10 +13,10 @@ import (
 type Config struct {
 	// Emby emby 相关配置
 	Emby *Emby `yaml:"emby"`
-	// Openlist openlist 相关配置
-	Openlist *Openlist `yaml:"openlist"`
-	// VideoPreview 网盘转码链接代理配置
-	VideoPreview *VideoPreview `yaml:"video-preview"`
+	// Nodes 节点配置
+	Nodes *Nodes `yaml:"nodes"`
+	// Auth 鉴权配置
+	Auth *Auth `yaml:"auth"`
 	// Path 路径相关配置
 	Path *Path `yaml:"path"`
 	// Cache 缓存相关配置
@@ -25,6 +25,8 @@ type Config struct {
 	Ssl *Ssl `yaml:"ssl"`
 	// Log 日志相关配置
 	Log *Log `yaml:"log"`
+	// Telegram Bot 配置
+	Telegram *Telegram `yaml:"telegram"`
 }
 
 // C 全局唯一配置对象

@@ -12,7 +12,9 @@ import (
 
 	"github.com/AmbitiousJun/go-emby2openlist/v2/internal/config"
 	"github.com/AmbitiousJun/go-emby2openlist/v2/internal/constant"
-	"github.com/AmbitiousJun/go-emby2openlist/v2/internal/service/openlist/localtree"
+	"github.com/AmbitiousJun/go-emby2openlist/v2/internal/service/emby"
+	"github.com/AmbitiousJun/go-emby2openlist/v2/internal/service/node"
+	"github.com/AmbitiousJun/go-emby2openlist/v2/internal/service/userkey"
 	"github.com/AmbitiousJun/go-emby2openlist/v2/internal/util/logs"
 	"github.com/AmbitiousJun/go-emby2openlist/v2/internal/util/logs/colors"
 	"github.com/AmbitiousJun/go-emby2openlist/v2/internal/web"
@@ -33,10 +35,20 @@ func main() {
 
 	printBanner()
 
-	logs.Info("正在初始化本地目录树模块...")
-	if err := localtree.Init(); err != nil {
-		log.Fatal(colors.ToRed(err.Error()))
-	}
+	// 初始化节点健康检查
+	logs.Info("正在初始化节点健康检查模块...")
+	healthChecker := node.NewHealthChecker(config.C.Nodes)
+	go healthChecker.Start()
+
+	// 初始化节点选择器
+	nodeSelector := node.NewSelector(healthChecker)
+
+	// 初始化用户 Key 缓存
+	logs.Info("正在初始化用户 Key 缓存模块...")
+	keyCache := userkey.NewCache(config.C.Auth.UserKeyCacheTTL)
+
+	// 初始化重定向模块
+	emby.InitRedirect(nodeSelector, keyCache)
 
 	logs.Info("正在启动服务...")
 	gin.SetMode(ginMode)

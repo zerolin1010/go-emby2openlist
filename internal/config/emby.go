@@ -42,6 +42,8 @@ var validDlStrategy = map[DlStrategy]struct{}{
 type Emby struct {
 	// Emby 源服务器地址
 	Host string `yaml:"host"`
+	// AdminApiKey 管理员 API Key (用于获取用户信息)
+	AdminApiKey string `yaml:"admin-api-key"`
 	// rclone 或者 cd 的挂载目录
 	MountPath string `yaml:"mount-path"`
 	// EpisodesUnplayPrior 在获取剧集列表时是否将未播资源优先展示

@@ -14,7 +14,6 @@ COPY go.mod go.sum ./
 RUN go mod download
 
 # 复制源码
-COPY cmd cmd
 COPY internal internal
 COPY main.go main.go
 

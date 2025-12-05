@@ -11,17 +11,11 @@ import (
 	"path/filepath"
 	"regexp"
 	"strings"
-	"sync"
 
 	"github.com/AmbitiousJun/go-emby2openlist/v2/internal/config"
-	"github.com/AmbitiousJun/go-emby2openlist/v2/internal/service/openlist"
-	"github.com/AmbitiousJun/go-emby2openlist/v2/internal/service/path"
 	"github.com/AmbitiousJun/go-emby2openlist/v2/internal/util/https"
 	"github.com/AmbitiousJun/go-emby2openlist/v2/internal/util/jsons"
-	"github.com/AmbitiousJun/go-emby2openlist/v2/internal/util/logs"
-	"github.com/AmbitiousJun/go-emby2openlist/v2/internal/util/randoms"
 	"github.com/AmbitiousJun/go-emby2openlist/v2/internal/util/strs"
-	"github.com/AmbitiousJun/go-emby2openlist/v2/internal/util/urls"
 
 	"github.com/gin-gonic/gin"
 )
@@ -121,183 +115,21 @@ func getEmbyFileLocalPath(itemInfo ItemInfo) (string, error) {
 }
 
 // findVideoPreviewInfos 查找 source 的所有转码资源
-//
-// 传递 resChan 进行异步查询, 通过监听 resChan 获取查询结果
+// 注意：已禁用 OpenList 转码功能
 func findVideoPreviewInfos(source *jsons.Item, clientApiKey string, resChan chan []*jsons.Item) {
 	if resChan == nil {
 		return
 	}
 	defer close(resChan)
 
-	if source == nil || source.Type() != jsons.JsonTypeObj {
-		resChan <- nil
-		return
-	}
-
-	// 未启用配置
-	cfg := config.C.VideoPreview
-	srcContainer, _ := source.Attr("Container").String()
-	if !cfg.Enable || !cfg.ContainerValid(srcContainer) {
-		resChan <- nil
-		return
-	}
-
-	// 转换 openlist 绝对路径
-	openlistPathRes := path.Emby2Openlist(source.Attr("Path").Val().(string))
-	var transcodingList []openlist.TranscodingVideoInfo
-	var subtitleList []openlist.TranscodingSubtitleInfo
-	firstFetchSuccess := false
-	if openlistPathRes.Success {
-		res := openlist.FetchFsOther(openlistPathRes.Path, nil)
-
-		if res.Code == http.StatusOK {
-			firstFetchSuccess = true
-			transcodingList = res.Data.VideoPreviewPlayInfo.LiveTranscodingTaskList
-			subtitleList = res.Data.VideoPreviewPlayInfo.LiveTranscodingSubtitleTaskList
-		}
-
-		if res.Code == http.StatusForbidden {
-			resChan <- nil
-			return
-		}
-	}
-
-	// 首次请求失败, 遍历 openlist 所有根目录, 重新请求
-	if !firstFetchSuccess {
-		paths, err := openlistPathRes.Range()
-		if err != nil {
-			logs.Error("转换 openlist 路径异常: %v", err)
-			resChan <- nil
-			return
-		}
-
-		for _, path := range paths {
-			res := openlist.FetchFsOther(path, nil)
-			if res.Code == http.StatusOK {
-				transcodingList = res.Data.VideoPreviewPlayInfo.LiveTranscodingTaskList
-				subtitleList = res.Data.VideoPreviewPlayInfo.LiveTranscodingSubtitleTaskList
-				break
-			}
-		}
-	}
-
-	if len(transcodingList) == 0 {
-		resChan <- nil
-		return
-	}
-
-	res := make([]*jsons.Item, len(transcodingList))
-	wg := sync.WaitGroup{}
-	itemId, _ := source.Attr("ItemId").String()
-	originName, _ := source.Attr("Name").String()
-	for idx, transcode := range transcodingList {
-		idx, transcode := idx, transcode
-		wg.Add(1)
-		go func() {
-			defer wg.Done()
-			if config.C.VideoPreview.IsTemplateIgnore(transcode.TemplateId) {
-				// 当前清晰度被忽略
-				return
-			}
-
-			copySource := jsons.FromValue(source.Struct())
-			format := fmt.Sprintf("%dx%d", transcode.TemplateWidth, transcode.TemplateHeight)
-			copySource.Attr("Name").Set(fmt.Sprintf("(%s_%s) %s", transcode.TemplateId, format, originName))
-
-			// 重要！！！这里的 id 必须和原本的 id 不一样, 但又要确保能够正常反推出原本的 id
-			newId := fmt.Sprintf(
-				"%s%s%s%s%s%s%s",
-				source.Attr("Id").Val(), MediaSourceIdSegment,
-				transcode.TemplateId, MediaSourceIdSegment,
-				format, MediaSourceIdSegment,
-				openlist.PathEncode(openlistPathRes.Path),
-			)
-			copySource.Attr("Id").Set(newId)
-
-			// 设置转码代理播放链接
-			tu, _ := url.Parse(strings.ReplaceAll(MasterM3U8UrlTemplate, "${itemId}", itemId))
-			q := tu.Query()
-			q.Set("openlist_path", openlist.PathEncode(openlistPathRes.Path))
-			q.Set("template_id", transcode.TemplateId)
-			q.Set(QueryApiKeyName, clientApiKey)
-			tu.RawQuery = q.Encode()
-
-			// 标记转码资源使用转码容器
-			copySource.Put("SupportsTranscoding", jsons.FromValue(true))
-			copySource.Put("TranscodingContainer", jsons.FromValue("ts"))
-			copySource.Put("TranscodingSubProtocol", jsons.FromValue("hls"))
-			copySource.Put("TranscodingUrl", jsons.FromValue(tu.String()))
-			copySource.DelKey("DirectStreamUrl")
-			copySource.Put("SupportsDirectPlay", jsons.FromValue(false))
-			copySource.Put("SupportsDirectStream", jsons.FromValue(false))
-
-			// 设置转码字幕
-			addSubtitles2MediaStreams(copySource, subtitleList, openlistPathRes.Path, transcode.TemplateId, clientApiKey)
-
-			res[idx] = copySource
-		}()
-	}
-	wg.Wait()
-
-	// 移除 res 中的空值项
-	nonNil := res[:0]
-	for _, v := range res {
-		if v == nil {
-			continue
-		}
-		nonNil = append(nonNil, v)
-	}
-	resChan <- nonNil
+	// 已禁用转码功能，直接返回 nil
+	resChan <- nil
 }
 
-// addSubtitles2MediaStreams 添加转码字幕到 PlaybackInfo 的 MediaStreams 项中
-//
-// subtitleList 是请求 openlist 转码信息接口获取到的字幕列表
-func addSubtitles2MediaStreams(source *jsons.Item, subtitleList []openlist.TranscodingSubtitleInfo, openlistPath, templateId, clientApiKey string) {
-	// 1 json 参数类型校验
-	if source == nil || len(subtitleList) == 0 {
-		return
-	}
-	mediaStreams, ok := source.Attr("MediaStreams").Done()
-	if !ok || mediaStreams.Type() != jsons.JsonTypeArr {
-		return
-	}
-
-	// 2 去除原始的字幕信息
-	mediaStreams = mediaStreams.Filter(func(val *jsons.Item) bool {
-		return val != nil && val.Attr("Type").Val() != "Subtitle"
-	})
-	source.Put("MediaStreams", mediaStreams)
-
-	// 3 生成 MediaStream
-	itemId, _ := source.Attr("ItemId").String()
-	curMediaStreamsSize := mediaStreams.Len()
-	fakeId := randoms.RandomHex(32)
-	for index, sub := range subtitleList {
-		subStream, _ := jsons.New(`{"AttachmentSize":0,"Codec":"vtt","DeliveryMethod":"External","DeliveryUrl":"/Videos/6066/4ce9f37fe8567a3898e66517b92cf2af/Subtitles/14/0/Stream.vtt?api_key=964a56845f6a4c4a8ba42204ec6f775c","DisplayTitle":"(VTT)","ExtendedVideoSubType":"None","ExtendedVideoSubTypeDescription":"None","ExtendedVideoType":"None","Index":14,"IsDefault":false,"IsExternal":true,"IsExternalUrl":false,"IsForced":false,"IsHearingImpaired":false,"IsInterlaced":false,"IsTextSubtitleStream":true,"Protocol":"File","SupportsExternalStream":true,"Type":"Subtitle"}`)
-
-		lang := jsons.FromValue(sub.Lang)
-		subStream.Put("DisplayLanguage", lang)
-		subStream.Put("Language", lang)
-
-		subName := urls.ResolveResourceName(sub.Url)
-		subStream.Put("DisplayTitle", jsons.FromValue(openlist.SubLangDisplayName(sub.Lang)))
-		subStream.Put("Title", jsons.FromValue(fmt.Sprintf("(%s) %s", sub.Lang, subName)))
-
-		idx := curMediaStreamsSize + index
-		subStream.Put("Index", jsons.FromValue(idx))
-
-		u, _ := url.Parse(fmt.Sprintf("/Videos/%s/%s/Subtitles/%d/0/Stream.vtt", itemId, fakeId, idx))
-		q := u.Query()
-		q.Set("openlist_path", openlist.PathEncode(openlistPath))
-		q.Set("template_id", templateId)
-		q.Set("sub_name", subName)
-		q.Set(QueryApiKeyName, clientApiKey)
-		u.RawQuery = q.Encode()
-		subStream.Put("DeliveryUrl", jsons.FromValue(u.String()))
-
-		mediaStreams.Append(subStream)
-	}
+// addSubtitles2MediaStreams 已禁用：添加转码字幕功能
+func addSubtitles2MediaStreams(source *jsons.Item, subtitleList interface{}, openlistPath, templateId, clientApiKey string) {
+	// 已禁用转码字幕功能
+	return
 }
 
 // tryGetVideoStreamInfo 尝试获取 MediaSource 中的视频流信息
@@ -534,16 +366,7 @@ func resolveMediaSourceId(id string) (MsInfo, error) {
 
 // getAllPreviewTemplateIds 获取所有转码格式
 //
-// 在配置文件中忽略的格式不会返回
+// 转码功能已禁用，直接返回空数组
 func getAllPreviewTemplateIds() []string {
-	allIds := []string{"LD", "SD", "HD", "FHD", "QHD"}
-
-	res := make([]string, 0, len(allIds))
-	for _, id := range allIds {
-		if config.C.VideoPreview.IsTemplateIgnore(id) {
-			continue
-		}
-		res = append(res, id)
-	}
-	return res
+	return []string{}
 }

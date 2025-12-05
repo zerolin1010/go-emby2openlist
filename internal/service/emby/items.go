@@ -192,10 +192,9 @@ func ProxyAddItemsPreviewInfo(c *gin.Context) {
 				ms.Attr("Path").Set(urls.Unescape(path))
 			}
 
+			// 转码功能已禁用
 			// 检查用户是否启用了转码版本获取
-			if !config.C.VideoPreview.Enable {
-				return nil
-			}
+			return nil
 
 			path, _ := ms.Attr("Path").Done()
 			st, _ := ms.Attr("SupportsTranscoding").Done()
