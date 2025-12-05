@@ -18,7 +18,7 @@ jobs:
       - name: Log in to Docker Hub
         uses: docker/login-action@v2
         with:
-          username: ambitiousjun
+          username: zerolin1010
           password: ${{ secrets.DOCKER_PASSWORD }}
 
       - name: Set up QEMU
@@ -31,5 +31,5 @@ jobs:
           platforms: linux/386,linux/arm/v7,linux/amd64,linux/arm64
           push: true
           tags: |
-            ambitiousjun/go-emby2openlist:${{ github.ref_name }}
-            ambitiousjun/go-emby2openlist:latest
+            zerolin1010/go-emby2openlist:${{ github.ref_name }}
+            zerolin1010/go-emby2openlist:latest
