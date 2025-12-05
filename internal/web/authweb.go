@@ -33,7 +33,7 @@ func ListenAuthServer(cache *userkey.Cache) error {
 	}
 
 	// 初始化鉴权服务器
-	authServerInstance = authserver.NewServer(cache, &config.C.Emby, accessLogger)
+	authServerInstance = authserver.NewServer(cache, config.C.Emby, accessLogger)
 
 	// 创建 Gin 引擎
 	r := gin.New()

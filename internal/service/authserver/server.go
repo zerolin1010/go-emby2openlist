@@ -113,7 +113,7 @@ func (s *Server) validateApiKey(apiKey string) (bool, error) {
 	// 调用 Emby API 验证
 	url := fmt.Sprintf("%s/emby/System/Info?api_key=%s", s.embyHost, apiKey)
 
-	resp, err := https.Get(url).Timeout(5 * time.Second).Do()
+	resp, err := https.Get(url).Do()
 	if err != nil {
 		return false, fmt.Errorf("请求 Emby 失败: %v", err)
 	}
