@@ -50,7 +50,15 @@ func main() {
 	// 初始化重定向模块
 	emby.InitRedirect(nodeSelector, keyCache)
 
-	logs.Info("正在启动服务...")
+	// 启动鉴权服务器（如果启用）
+	if config.C.Auth.EnableAuthServer {
+		logs.Info("正在启动鉴权服务器...")
+		if err := web.ListenAuthServer(keyCache); err != nil {
+			logs.Error("鉴权服务器启动失败: %v", err)
+		}
+	}
+
+	logs.Info("正在启动主服务...")
 	gin.SetMode(ginMode)
 	if err := web.Listen(); err != nil {
 		log.Fatal(colors.ToRed(err.Error()))

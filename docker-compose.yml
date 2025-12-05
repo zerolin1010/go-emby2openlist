@@ -12,6 +12,8 @@ services:
     volumes:
       - ./config.yml:/app/config.yml
       - ./ssl:/app/ssl
+      - ./logs:/app/logs
     ports:
       - 8095:8095 # http
       - 8094:8094 # https
+      - 8097:8097 # auth server
