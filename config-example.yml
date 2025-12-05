@@ -60,6 +60,13 @@ auth:
   # 是否启用 Nginx 端鉴权 (302 URL 携带 api_key 参数)
   nginx-auth-enable: true
 
+  # 鉴权服务器配置（高级功能）
+  # 启用后，Nginx 可以通过 auth_request 调用本服务进行鉴权
+  enable-auth-server: false           # 是否启用鉴权服务器
+  auth-server-port: "8097"            # 鉴权服务器监听端口
+  enable-auth-server-log: true        # 是否记录访问日志
+  auth-server-log-path: "./logs/auth-access.log"  # 访问日志文件路径
+
 # 路径映射配置
 path:
   # Emby 路径到 Nginx 路径的映射
