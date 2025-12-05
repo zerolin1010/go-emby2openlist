@@ -19,7 +19,7 @@
 
 ---
 
-## 📢 重要更新 v2.3.3
+## 📢 重要更新 v2.4.1
 
 **🎉 项目已从 OpenList 网盘模式改造为本地 Nginx 多节点 CDN 模式！**
 
@@ -28,6 +28,8 @@
 - ✅ **多节点 CDN 支持** - 类似 CDN 的多节点架构
 - ✅ **自动健康检查** - 实时监控节点状态，自动故障转移
 - ✅ **加权负载均衡** - 智能分配请求到不同节点
+- ✅ **后端鉴权服务器** - 集中式鉴权，支持 Nginx auth_request（v2.4.0 新功能）
+- ✅ **访问日志和统计** - JSON 格式日志，实时统计 API（v2.4.0 新功能）
 - ✅ **Telegram Bot 管理** - 远程管理节点，动态添加/删除
 - ✅ **302 重定向** - 客户端直连 Nginx，不消耗代理服务器带宽
 
@@ -65,7 +67,27 @@
 
 详细使用：[Telegram Bot 文档](./docs/TELEGRAM_BOT.md)
 
-### 4. 其他功能
+### 4. 后端鉴权服务器（v2.4.0 新增）
+
+可选的集中式鉴权服务，用于 Nginx `auth_request` 集成：
+
+- **端口**: 8097（可配置）
+- **功能**: API Key 验证，访问日志，实时统计
+- **性能**: 支持 API Key 缓存，异步日志写入
+- **安全**: API Key 自动脱敏记录
+
+**使用场景**：
+- Nginx 收到播放请求 → 调用后端 `/api/auth` 验证
+- 后端验证通过 → Nginx 返回 302 重定向
+- 所有鉴权由后端集中处理，Nginx 专注文件服务
+
+详细文档：
+- 📖 [后端鉴权架构](./docs/BACKEND_AUTH_ARCHITECTURE.md)
+- 📖 [鉴权服务器使用指南](./docs/AUTH_SERVER.md)
+- 📖 [5分钟快速开始](./docs/AUTH_SERVER_QUICKSTART.md)
+- 📖 [Nginx 鉴权方案对比](./docs/NGINX_AUTH.md)
+
+### 5. 其他功能
 
 - ✅ Strm 直链播放
 - ✅ WebSocket 代理
@@ -118,7 +140,7 @@
 
 ```bash
 mkdir go-emby2openlist && cd go-emby2openlist
-wget https://raw.githubusercontent.com/zerolin1010/go-emby2openlist/v2.3.3/config-example.yml -O config.yml
+wget https://raw.githubusercontent.com/zerolin1010/go-emby2openlist/main/config-example.yml -O config.yml
 ```
 
 2. **修改配置**
@@ -160,12 +182,26 @@ services:
     restart: always
     volumes:
       - ./config.yml:/app/config.yml
+      - ./logs:/app/logs              # 可选：日志目录（如果启用鉴权服务器日志）
+      # - ./ssl:/app/ssl              # 可选：SSL 证书（如果启用 HTTPS）
     ports:
-      - 8095:8095
-      - 8094:8094
+      - 8095:8095                     # HTTP 服务（必需）
+      - 8094:8094                     # HTTPS 服务（可选，需要配置 SSL）
+      - 8097:8097                     # 鉴权服务器（可选，如果启用后端鉴权）
     environment:
       - TZ=Asia/Shanghai
+      - GIN_MODE=release              # 生产模式（可选）
 ```
+
+**端口说明**：
+- `8095`: 主 HTTP 服务（必需）- Emby 客户端连接此端口
+- `8094`: HTTPS 服务（可选）- 需要在 config.yml 中配置 SSL
+- `8097`: 鉴权服务器（可选）- 仅在启用 `enable-auth-server: true` 时需要
+
+**卷挂载说明**：
+- `./config.yml`: 配置文件（必需）
+- `./logs`: 日志目录（可选）- 仅在启用 `enable-auth-server-log: true` 时需要
+- `./ssl`: SSL 证书（可选）- 仅在启用 HTTPS 时需要
 
 4. **启动服务**
 
@@ -179,7 +215,22 @@ docker-compose up -d
 docker logs -f go-emby2openlist
 ```
 
-#### 方式 2: 使用现有镜像
+6. **验证服务**
+
+```bash
+# 检查主服务（HTTP）
+curl http://localhost:8095
+
+# 检查鉴权服务器（如果启用）
+curl http://localhost:8097/api/health
+# 应返回: {"service":"auth-server","status":"ok"}
+
+# 查看鉴权统计（如果启用）
+curl http://localhost:8097/api/stats
+# 应返回: {"success_count":0,"failure_count":0,"last_update":"..."}
+```
+
+#### 方式 2: 直接使用 Docker（不使用 Compose）
 
 ```bash
 docker pull zerolin1010/go-emby2openlist:latest
@@ -188,10 +239,136 @@ docker run -d \
   --name go-emby2openlist \
   --restart always \
   -v $(pwd)/config.yml:/app/config.yml \
+  -v $(pwd)/logs:/app/logs \
   -p 8095:8095 \
   -p 8094:8094 \
+  -p 8097:8097 \
+  -e TZ=Asia/Shanghai \
+  -e GIN_MODE=release \
   zerolin1010/go-emby2openlist:latest
 ```
+
+#### 方式 3: 从源码编译
+
+```bash
+# 克隆仓库
+git clone https://github.com/zerolin1010/go-emby2openlist.git
+cd go-emby2openlist
+
+# 编译
+go build -o go-emby2openlist
+
+# 运行
+./go-emby2openlist
+```
+
+---
+
+## 🔐 后端鉴权服务器配置（可选）
+
+### 为什么需要鉴权服务器？
+
+如果您需要以下功能，建议启用鉴权服务器：
+
+- ✅ **集中式鉴权** - 所有节点的鉴权由后端统一处理
+- ✅ **详细访问日志** - JSON 格式，记录每次访问（API Key 自动脱敏）
+- ✅ **实时统计** - 查看成功/失败次数，监控系统使用情况
+- ✅ **Nginx auth_request** - Nginx 通过后端验证，无需在配置中硬编码 API Key
+
+### 快速启用（3 步）
+
+#### 1. 修改 config.yml
+
+```yaml
+auth:
+  user-key-cache-ttl: 24h
+  nginx-auth-enable: true
+
+  # 启用鉴权服务器
+  enable-auth-server: true           # 改为 true
+  auth-server-port: "8097"
+  enable-auth-server-log: true
+  auth-server-log-path: "./logs/auth-access.log"
+```
+
+#### 2. 更新 docker-compose.yml
+
+确保暴露 8097 端口和挂载日志目录：
+
+```yaml
+ports:
+  - 8095:8095
+  - 8094:8094
+  - 8097:8097    # 鉴权服务器端口
+volumes:
+  - ./config.yml:/app/config.yml
+  - ./logs:/app/logs    # 日志目录
+```
+
+#### 3. 重启服务
+
+```bash
+docker-compose down
+docker-compose up -d
+```
+
+#### 4. 验证鉴权服务器
+
+```bash
+# 健康检查
+curl http://localhost:8097/api/health
+
+# 测试鉴权（替换 YOUR_API_KEY）
+curl "http://localhost:8097/api/auth?api_key=YOUR_API_KEY"
+
+# 查看统计
+curl http://localhost:8097/api/stats
+
+# 查看日志
+tail -f logs/auth-access.log
+```
+
+### Nginx 集成
+
+修改 Nginx 配置，使用 `auth_request` 调用后端鉴权：
+
+```nginx
+upstream auth_backend {
+    server go-emby2openlist:8097;
+    keepalive 32;
+}
+
+# 鉴权子请求
+location = /auth {
+    internal;
+    proxy_pass http://auth_backend/api/auth?api_key=$arg_api_key;
+    proxy_pass_request_body off;
+    proxy_set_header Content-Length "";
+}
+
+# 视频服务
+location /video/data {
+    auth_request /auth;    # 使用后端鉴权
+    auth_request_set $auth_status $upstream_status;
+
+    alias /mnt/media/;
+    add_header X-Auth-Status $auth_status;
+}
+```
+
+完整配置示例：[nginx/video-with-backend-auth.conf](./nginx/video-with-backend-auth.conf)
+
+### API 接口
+
+鉴权服务器提供 3 个 API：
+
+| 接口 | 方法 | 说明 |
+|-----|------|------|
+| `/api/auth` | GET | 验证 API Key（Nginx auth_request） |
+| `/api/stats` | GET | 获取统计信息 |
+| `/api/health` | GET | 健康检查 |
+
+详细文档：[AUTH_SERVER.md](./docs/AUTH_SERVER.md)
 
 ---
 
@@ -288,6 +465,30 @@ path:
     - /media/series:/video/series
 ```
 
+#### 鉴权配置
+
+```yaml
+auth:
+  user-key-cache-ttl: 24h           # API Key 缓存时间
+  nginx-auth-enable: true           # 启用 Nginx 鉴权检查
+
+  # 后端鉴权服务器（可选，v2.4.0 新增）
+  enable-auth-server: false         # 是否启用鉴权服务器
+  auth-server-port: "8097"          # 鉴权服务器端口
+  enable-auth-server-log: true      # 是否记录访问日志
+  auth-server-log-path: "./logs/auth-access.log"  # 日志文件路径
+```
+
+**何时启用鉴权服务器**：
+- ✅ 需要 Nginx 通过 `auth_request` 验证请求
+- ✅ 需要详细的访问日志（JSON 格式）
+- ✅ 需要实时统计 API（成功/失败次数）
+- ❌ 不需要 - 如果使用 URL 参数鉴权或 Emby API 鉴权
+
+参考文档：
+- [后端鉴权架构说明](./docs/BACKEND_AUTH_ARCHITECTURE.md)
+- [Nginx 鉴权方案对比](./docs/NGINX_AUTH.md)
+
 #### Telegram Bot（可选）
 
 ```yaml
@@ -317,8 +518,19 @@ telegram:
 
 ## 📚 文档
 
+### 架构和设计
+- 📖 [完整架构设计](./docs/ARCHITECTURE.md) - 系统架构详解，视频流机制
+- 📖 [后端鉴权架构](./docs/BACKEND_AUTH_ARCHITECTURE.md) - 后端鉴权服务器架构说明
+
+### 鉴权相关
+- 📖 [鉴权服务器使用指南](./docs/AUTH_SERVER.md) - 完整的 API 文档和配置
+- 📖 [5分钟快速开始](./docs/AUTH_SERVER_QUICKSTART.md) - 快速配置鉴权服务器
+- 📖 [Nginx 鉴权方案对比](./docs/NGINX_AUTH.md) - 3 种鉴权方案的性能对比
+
+### 配置和测试
 - 📖 [迁移指南](./MIGRATION_GUIDE.md) - 从 OpenList 迁移到 Nginx 模式
 - 📖 [测试指南](./docs/TESTING_GUIDE.md) - 完整测试步骤
+- 📖 [测试报告 v2.4.0](./TEST_REPORT_V2.4.0.md) - 最新版本测试结果
 - 📖 [Telegram Bot 文档](./docs/TELEGRAM_BOT.md) - Bot 使用说明
 - 📖 [Nginx 配置](./nginx/README.md) - Nginx 详细配置
 
