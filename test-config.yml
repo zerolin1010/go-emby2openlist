@@ -1,0 +1,44 @@
+emby:
+  host: http://localhost:8096
+  admin-api-key: "test-admin-key"
+  mount-path: /media
+  local-media-root: /data/local
+  proxy-error-strategy: origin
+  images-quality: 100
+
+nodes:
+  health-check:
+    interval: 30
+    timeout: 5
+    fail-threshold: 3
+    success-threshold: 2
+  list:
+    - name: "node-1"
+      host: "http://192.168.0.10:80"
+      weight: 100
+      enabled: true
+
+auth:
+  user-key-cache-ttl: 24h
+  nginx-auth-enable: true
+  enable-auth-server: true
+  auth-server-port: "8097"
+  enable-auth-server-log: true
+  auth-server-log-path: "./test-logs/auth-access.log"
+
+path:
+  emby2nginx:
+    - /media/data:/video/data
+
+cache:
+  enable: true
+  expired: 1d
+
+ssl:
+  enable: false
+
+log:
+  disable-color: false
+
+telegram:
+  enable: false

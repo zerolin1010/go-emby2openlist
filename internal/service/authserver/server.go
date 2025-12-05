@@ -247,14 +247,14 @@ func maskApiKey(apiKey string) string {
 
 // Stats 统计信息
 type Stats struct {
-	TotalRequests   int64              `json:"total_requests"`
-	SuccessRequests int64              `json:"success_requests"`
-	FailedRequests  int64              `json:"failed_requests"`
-	FailReasons     map[string]int64   `json:"fail_reasons"`
-	LastHourStats   HourlyStats        `json:"last_hour_stats"`
-	TopUsers        []UserStats        `json:"top_users"`
-	AverageDuration time.Duration      `json:"average_duration"`
-	mu              sync.RWMutex       `json:"-"`
+	TotalRequests   int64            `json:"total_requests"`
+	SuccessRequests int64            `json:"success_requests"`
+	FailedRequests  int64            `json:"failed_requests"`
+	FailReasons     map[string]int64 `json:"fail_reasons"`
+	LastHourStats   HourlyStats      `json:"last_hour_stats"`
+	TopUsers        []UserStats      `json:"top_users"`
+	AverageDuration time.Duration    `json:"average_duration"`
+	mu              sync.RWMutex     `json:"-"`
 }
 
 // HourlyStats 每小时统计
@@ -266,8 +266,8 @@ type HourlyStats struct {
 
 // UserStats 用户统计
 type UserStats struct {
-	ApiKey   string `json:"api_key"`
-	Requests int64  `json:"requests"`
+	ApiKey   string    `json:"api_key"`
+	Requests int64     `json:"requests"`
 	LastSeen time.Time `json:"last_seen"`
 }
 
@@ -278,7 +278,7 @@ type AccessLog struct {
 	Method       string        `json:"method"`
 	URI          string        `json:"uri"`
 	Status       int           `json:"status"`
-	ApiKey       string        `json:"api_key"`       // 已脱敏
+	ApiKey       string        `json:"api_key"` // 已脱敏
 	UserAgent    string        `json:"user_agent"`
 	Referer      string        `json:"referer"`
 	Duration     time.Duration `json:"duration"`
