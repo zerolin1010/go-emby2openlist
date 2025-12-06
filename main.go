@@ -14,6 +14,7 @@ import (
 	"github.com/AmbitiousJun/go-emby2openlist/v2/internal/constant"
 	"github.com/AmbitiousJun/go-emby2openlist/v2/internal/service/emby"
 	"github.com/AmbitiousJun/go-emby2openlist/v2/internal/service/node"
+	"github.com/AmbitiousJun/go-emby2openlist/v2/internal/service/telegram"
 	"github.com/AmbitiousJun/go-emby2openlist/v2/internal/service/userkey"
 	"github.com/AmbitiousJun/go-emby2openlist/v2/internal/util/logs"
 	"github.com/AmbitiousJun/go-emby2openlist/v2/internal/util/logs/colors"
@@ -55,6 +56,18 @@ func main() {
 		logs.Info("正在启动鉴权服务器...")
 		if err := web.ListenAuthServer(keyCache); err != nil {
 			logs.Error("鉴权服务器启动失败: %v", err)
+		}
+	}
+
+	// 启动 Telegram Bot（如果启用）
+	if config.C.Telegram.Enable {
+		logs.Info("正在启动 Telegram Bot...")
+		bot, err := telegram.NewBot(healthChecker)
+		if err != nil {
+			logs.Error("Telegram Bot 启动失败: %v", err)
+		} else {
+			go bot.Start()
+			logs.Success("Telegram Bot 启动成功")
 		}
 	}
 
