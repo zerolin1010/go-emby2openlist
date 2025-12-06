@@ -48,16 +48,10 @@ func SaveToFile() error {
 		return fmt.Errorf("序列化配置失败: %v", err)
 	}
 
-	// 先写入临时文件
-	tempFile := configFilePath + ".tmp"
-	if err := os.WriteFile(tempFile, data, 0644); err != nil {
-		return fmt.Errorf("写入临时文件失败: %v", err)
-	}
-
-	// 原子性替换配置文件
-	if err := os.Rename(tempFile, configFilePath); err != nil {
-		os.Remove(tempFile) // 清理临时文件
-		return fmt.Errorf("替换配置文件失败: %v", err)
+	// Docker 挂载文件不能使用 rename（会报 device or resource busy）
+	// 直接覆盖写入（虽然不是原子操作，但在单进程环境下安全）
+	if err := os.WriteFile(configFilePath, data, 0644); err != nil {
+		return fmt.Errorf("写入配置文件失败: %v", err)
 	}
 
 	return nil
