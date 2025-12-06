@@ -55,6 +55,13 @@ func (c *Cache) Set(userId, apiKey string) {
 	}
 }
 
+// Delete 删除缓存项
+func (c *Cache) Delete(userId string) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	delete(c.data, userId)
+}
+
 // GetOrFetch 获取或使用原始 Key
 func (c *Cache) GetOrFetch(userId, originalKey string) string {
 	// 尝试从缓存获取

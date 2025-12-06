@@ -18,23 +18,25 @@ import (
 
 // VideoAuthService 视频鉴权服务
 type VideoAuthService struct {
-	cache       *userkey.Cache
-	embyHost    string
-	adminApiKey string
-	secretKey   string
-	tokenTTL    time.Duration
-	uidCache    *userkey.Cache // UID 到 api_key 的映射缓存
+	cache         *userkey.Cache
+	embyHost      string
+	adminApiKey   string
+	secretKey     string
+	tokenTTL      time.Duration
+	uidCache      *userkey.Cache               // UID 到 api_key 的映射缓存
+	playingSessions *userkey.Cache             // 播放会话跟踪（token -> 最后活跃时间）
 }
 
 // NewVideoAuthService 创建视频鉴权服务
 func NewVideoAuthService(cache *userkey.Cache, cfg *config.Emby) *VideoAuthService {
 	return &VideoAuthService{
-		cache:       cache,
-		embyHost:    cfg.Host,
-		adminApiKey: cfg.AdminApiKey,
-		secretKey:   "go-emby2openlist-secret-2024", // TODO: 从配置读取
-		tokenTTL:    5 * time.Minute,                // 临时 URL 有效期 5 分钟
-		uidCache:    userkey.NewCache(10 * time.Minute), // UID 缓存有效期 10 分钟
+		cache:           cache,
+		embyHost:        cfg.Host,
+		adminApiKey:     cfg.AdminApiKey,
+		secretKey:       "go-emby2openlist-secret-2024", // TODO: 从配置读取
+		tokenTTL:        5 * time.Minute,                // 临时 URL 有效期 5 分钟
+		uidCache:        userkey.NewCache(10 * time.Minute), // UID 缓存有效期 10 分钟
+		playingSessions: userkey.NewCache(30 * time.Minute), // 播放会话缓存 30 分钟
 	}
 }
 
@@ -107,8 +109,11 @@ func (s *VideoAuthService) HandleVerifyToken(c *gin.Context) {
 	var expiresAt int64
 	fmt.Sscanf(expiresStr, "%d", &expiresAt)
 
+	now := time.Now()
+	currentUnix := now.Unix()
+
 	// 3. 检查是否过期
-	if time.Now().Unix() > expiresAt {
+	if currentUnix > expiresAt {
 		logs.Warn("[TokenVerify] Token 已过期，路径: %s, IP: %s", path, c.ClientIP())
 		c.Status(http.StatusForbidden)
 		return
@@ -130,11 +135,47 @@ func (s *VideoAuthService) HandleVerifyToken(c *gin.Context) {
 		return
 	}
 
-	// 6. 验证通过，记录下载日志
-	logs.Info("[TokenVerify] Token 验证通过，用户: %s, 文件: %s, IP: %s",
-		maskApiKey(apiKey), path, c.ClientIP())
+	// 6. 自动续期逻辑（基于播放会话）
+	sessionKey := fmt.Sprintf("%s:%s", token, uid)
 
-	// 7. 返回 200 表示验证通过
+	// 检查是否存在活跃的播放会话
+	if sessionExpiresStr, ok := s.playingSessions.Get(sessionKey); ok {
+		// 会话存在，使用会话的过期时间代替 URL 中的过期时间
+		var sessionExpires int64
+		fmt.Sscanf(sessionExpiresStr, "%d", &sessionExpires)
+
+		// 如果会话未过期，允许访问并续期
+		if currentUnix <= sessionExpires {
+			// 每次请求都续期会话（延长 5 分钟）
+			newSessionExpires := currentUnix + int64(s.tokenTTL.Seconds())
+			s.playingSessions.Set(sessionKey, fmt.Sprintf("%d", newSessionExpires))
+
+			logs.Info("[TokenVerify] 播放会话续期，用户: %s, 文件: %s, IP: %s, 新过期时间: %s",
+				maskApiKey(apiKey), path, c.ClientIP(),
+				time.Unix(newSessionExpires, 0).Format("2006-01-02 15:04:05"))
+
+			// 验证通过
+			c.Status(http.StatusOK)
+			return
+		}
+
+		// 会话已过期，删除会话
+		s.playingSessions.Delete(sessionKey)
+		logs.Warn("[TokenVerify] 播放会话已过期（闲置超过5分钟），路径: %s, IP: %s", path, c.ClientIP())
+		c.Status(http.StatusForbidden)
+		return
+	}
+
+	// 7. 首次访问，创建播放会话
+	// 如果 Token 本身未过期，创建新会话（续期 5 分钟）
+	sessionExpires := currentUnix + int64(s.tokenTTL.Seconds())
+	s.playingSessions.Set(sessionKey, fmt.Sprintf("%d", sessionExpires))
+
+	logs.Info("[TokenVerify] 创建播放会话，用户: %s, 文件: %s, IP: %s, 会话过期时间: %s",
+		maskApiKey(apiKey), path, c.ClientIP(),
+		time.Unix(sessionExpires, 0).Format("2006-01-02 15:04:05"))
+
+	// 8. 返回 200 表示验证通过
 	c.Status(http.StatusOK)
 }
 
