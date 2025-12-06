@@ -6,10 +6,12 @@ import (
 	"encoding/hex"
 	"fmt"
 	"net/http"
+	"net/url"
 	"strings"
 	"time"
 
 	"github.com/AmbitiousJun/go-emby2openlist/v2/internal/config"
+	"github.com/AmbitiousJun/go-emby2openlist/v2/internal/service/node"
 	"github.com/AmbitiousJun/go-emby2openlist/v2/internal/service/userkey"
 	"github.com/AmbitiousJun/go-emby2openlist/v2/internal/util/https"
 	"github.com/AmbitiousJun/go-emby2openlist/v2/internal/util/logs"
@@ -18,17 +20,18 @@ import (
 
 // VideoAuthService 视频鉴权服务
 type VideoAuthService struct {
-	cache         *userkey.Cache
-	embyHost      string
-	adminApiKey   string
-	secretKey     string
-	tokenTTL      time.Duration
-	uidCache      *userkey.Cache               // UID 到 api_key 的映射缓存
-	playingSessions *userkey.Cache             // 播放会话跟踪（token -> 最后活跃时间）
+	cache           *userkey.Cache
+	embyHost        string
+	adminApiKey     string
+	secretKey       string
+	tokenTTL        time.Duration
+	uidCache        *userkey.Cache     // UID 到 api_key 的映射缓存
+	playingSessions *userkey.Cache     // 播放会话跟踪（token -> 最后活跃时间）
+	healthChecker   *node.HealthChecker // 节点健康检查器（用于故障转移）
 }
 
 // NewVideoAuthService 创建视频鉴权服务
-func NewVideoAuthService(cache *userkey.Cache, cfg *config.Emby) *VideoAuthService {
+func NewVideoAuthService(cache *userkey.Cache, cfg *config.Emby, healthChecker *node.HealthChecker) *VideoAuthService {
 	return &VideoAuthService{
 		cache:           cache,
 		embyHost:        cfg.Host,
@@ -37,6 +40,7 @@ func NewVideoAuthService(cache *userkey.Cache, cfg *config.Emby) *VideoAuthServi
 		tokenTTL:        5 * time.Minute,                // 临时 URL 有效期 5 分钟
 		uidCache:        userkey.NewCache(10 * time.Minute), // UID 缓存有效期 10 分钟
 		playingSessions: userkey.NewCache(30 * time.Minute), // 播放会话缓存 30 分钟
+		healthChecker:   healthChecker,                      // 节点健康检查器
 	}
 }
 
@@ -135,8 +139,23 @@ func (s *VideoAuthService) HandleVerifyToken(c *gin.Context) {
 		return
 	}
 
-	// 6. 自动续期逻辑（基于播放会话）
+	// 6. 自动续期逻辑（基于播放会话）+ 节点健康检查
 	sessionKey := fmt.Sprintf("%s:%s", token, uid)
+
+	// 检查当前节点是否健康（实现自动故障转移）
+	if s.healthChecker != nil {
+		requestHost := c.Request.Host
+		isHealthy := s.isNodeHealthy(requestHost)
+		if !isHealthy {
+			// 节点不健康 → 拒绝续期 → 强制客户端重新 302 重定向
+			logs.Warn("[TokenVerify] 节点不健康，拒绝访问，强制重新选择节点: %s, 路径: %s, IP: %s",
+				requestHost, path, c.ClientIP())
+			// 删除会话，强制重新鉴权
+			s.playingSessions.Delete(sessionKey)
+			c.Status(http.StatusForbidden)
+			return
+		}
+	}
 
 	// 检查是否存在活跃的播放会话
 	if sessionExpiresStr, ok := s.playingSessions.Get(sessionKey); ok {
@@ -208,6 +227,39 @@ func (s *VideoAuthService) validateApiKey(apiKey string) (bool, error) {
 	}
 
 	return resp.StatusCode == http.StatusOK, nil
+}
+
+// isNodeHealthy 检查节点是否健康（基于请求的 Host）
+func (s *VideoAuthService) isNodeHealthy(requestHost string) bool {
+	if s.healthChecker == nil {
+		return true // 健康检查器未初始化，默认认为健康
+	}
+
+	// 获取所有节点
+	allNodes := s.healthChecker.GetAllNodes()
+
+	// 遍历查找匹配的节点
+	for _, nodeStatus := range allNodes {
+		// 解析节点的 Host
+		nodeURL, err := url.Parse(nodeStatus.GetHost())
+		if err != nil {
+			continue
+		}
+
+		// 比较 Host（支持 IP:Port 和域名:Port）
+		if nodeURL.Host == requestHost || nodeStatus.GetHost() == requestHost {
+			// 找到匹配的节点，返回健康状态
+			isHealthy := nodeStatus.IsHealthy()
+			if !isHealthy {
+				logs.Warn("[VideoAuth] 节点不健康: %s (%s)", nodeStatus.GetName(), nodeStatus.GetHost())
+			}
+			return isHealthy
+		}
+	}
+
+	// 未找到匹配的节点，可能是直接访问 Emby，认为健康
+	logs.Info("[VideoAuth] 未找到匹配的节点: %s, 认为健康", requestHost)
+	return true
 }
 
 // generateToken 生成临时签名

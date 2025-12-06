@@ -3,6 +3,7 @@ package web
 import (
 	"github.com/AmbitiousJun/go-emby2openlist/v2/internal/config"
 	"github.com/AmbitiousJun/go-emby2openlist/v2/internal/service/authserver"
+	"github.com/AmbitiousJun/go-emby2openlist/v2/internal/service/node"
 	"github.com/AmbitiousJun/go-emby2openlist/v2/internal/service/userkey"
 	"github.com/AmbitiousJun/go-emby2openlist/v2/internal/service/videoauth"
 	"github.com/AmbitiousJun/go-emby2openlist/v2/internal/util/logs"
@@ -17,7 +18,7 @@ var (
 )
 
 // ListenAuthServer 启动鉴权服务器
-func ListenAuthServer(cache *userkey.Cache) error {
+func ListenAuthServer(cache *userkey.Cache, healthChecker *node.HealthChecker) error {
 	if !config.C.Auth.EnableAuthServer {
 		logs.Info("鉴权服务器未启用")
 		return nil
@@ -37,8 +38,8 @@ func ListenAuthServer(cache *userkey.Cache) error {
 	// 初始化鉴权服务器
 	authServerInstance = authserver.NewServer(cache, config.C.Emby, accessLogger)
 
-	// 初始化视频鉴权服务
-	videoAuthService = videoauth.NewVideoAuthService(cache, config.C.Emby)
+	// 初始化视频鉴权服务（传入健康检查器，用于故障转移）
+	videoAuthService = videoauth.NewVideoAuthService(cache, config.C.Emby, healthChecker)
 
 	// 创建 Gin 引擎
 	r := gin.New()
