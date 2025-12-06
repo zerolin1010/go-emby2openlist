@@ -110,7 +110,15 @@ func (s *Server) HandleAuthAndRedirect(c *gin.Context) {
 
 // validateApiKey 验证 API Key 是否有效
 func (s *Server) validateApiKey(apiKey string) (bool, error) {
-	// 调用 Emby API 验证
+	// 1. 先检查缓存
+	if s.cache != nil {
+		if _, ok := s.cache.Get(apiKey); ok {
+			// 缓存中存在，说明之前验证过，直接返回 true
+			return true, nil
+		}
+	}
+
+	// 2. 缓存未命中，调用 Emby API 验证
 	url := fmt.Sprintf("%s/emby/System/Info?api_key=%s", s.embyHost, apiKey)
 
 	resp, err := https.Get(url).Do()
@@ -122,6 +130,11 @@ func (s *Server) validateApiKey(apiKey string) (bool, error) {
 	// 401 表示无效
 	if resp.StatusCode == http.StatusUnauthorized {
 		return false, nil
+	}
+
+	// 3. 验证成功，加入缓存
+	if resp.StatusCode == http.StatusOK && s.cache != nil {
+		s.cache.Set(apiKey, apiKey) // 使用 api_key 作为 key 和 value
 	}
 
 	return resp.StatusCode == http.StatusOK, nil
