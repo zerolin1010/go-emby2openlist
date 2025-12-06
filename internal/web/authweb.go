@@ -4,14 +4,16 @@ import (
 	"github.com/AmbitiousJun/go-emby2openlist/v2/internal/config"
 	"github.com/AmbitiousJun/go-emby2openlist/v2/internal/service/authserver"
 	"github.com/AmbitiousJun/go-emby2openlist/v2/internal/service/userkey"
+	"github.com/AmbitiousJun/go-emby2openlist/v2/internal/service/videoauth"
 	"github.com/AmbitiousJun/go-emby2openlist/v2/internal/util/logs"
 
 	"github.com/gin-gonic/gin"
 )
 
 var (
-	authServerInstance *authserver.Server
-	accessLogger       *authserver.AccessLogger
+	authServerInstance  *authserver.Server
+	videoAuthService    *videoauth.VideoAuthService
+	accessLogger        *authserver.AccessLogger
 )
 
 // ListenAuthServer 启动鉴权服务器
@@ -35,6 +37,9 @@ func ListenAuthServer(cache *userkey.Cache) error {
 	// 初始化鉴权服务器
 	authServerInstance = authserver.NewServer(cache, config.C.Emby, accessLogger)
 
+	// 初始化视频鉴权服务
+	videoAuthService = videoauth.NewVideoAuthService(cache, config.C.Emby)
+
 	// 创建 Gin 引擎
 	r := gin.New()
 	r.Use(gin.Recovery())
@@ -51,6 +56,12 @@ func ListenAuthServer(cache *userkey.Cache) error {
 
 		// 统计接口
 		api.GET("/stats", authServerInstance.HandleStats)
+
+		// 视频鉴权接口（方案1：应用层签名）
+		api.GET("/video-auth/*path", videoAuthService.HandleVideoAuth)
+
+		// 令牌验证接口（供 Nginx auth_request 使用）
+		api.GET("/verify-token", videoAuthService.HandleVerifyToken)
 
 		// 健康检查
 		api.GET("/health", func(c *gin.Context) {
