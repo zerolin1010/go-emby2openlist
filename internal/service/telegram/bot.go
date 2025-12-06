@@ -90,6 +90,10 @@ func (b *Bot) handleCommand(message *tgbotapi.Message) {
 		b.handleAdd(message.Chat.ID, args)
 	case "del", "delete":
 		b.handleDelete(message.Chat.ID, args)
+	case "batchadd":
+		b.handleBatchAdd(message.Chat.ID, args)
+	case "batchdel", "batchdelete":
+		b.handleBatchDelete(message.Chat.ID, args)
 	case "enable":
 		b.handleEnable(message.Chat.ID, args)
 	case "disable":
@@ -107,18 +111,29 @@ func (b *Bot) handleHelp(chatID int64) {
 
 📋 *可用命令：*
 
+*基础操作：*
 • /list - 列出所有节点
 • /status - 查看节点健康状态
-• /add <name> <host> <weight> - 添加节点
-  例如: /add node1 http://1.2.3.4:80 100
+
+*单节点操作：*
+• /add <host> [weight] - 添加节点（自动命名）
+  例如: /add http://1.2.3.4:80
+  或: /add http://1.2.3.4:80 100
 • /del <name> - 删除节点
 • /enable <name> - 启用节点
 • /disable <name> - 禁用节点
-• /help - 显示此帮助
+
+*批量操作：*
+• /batchadd <host1> <host2> ... - 批量添加节点
+  例如: /batchadd http://1.2.3.4:80 http://5.6.7.8:80:50
+• /batchdel <name1> <name2> ... - 批量删除节点
+  例如: /batchdel node1 node2
 
 💡 *提示：*
+- 节点会自动命名（格式：node-{IP简写}-{序号}）
 - 节点必须支持健康检查接口 (GET /gtm-health)
-- 权重范围: 1-100
+- 权重范围: 1-100，默认 100
+- 可在host后加:weight指定权重
 - 权重越高，被选中的概率越大`
 
 	b.replyMarkdown(chatID, help)
@@ -151,20 +166,19 @@ func (b *Bot) handleList(chatID int64) {
 	b.replyMarkdown(chatID, sb.String())
 }
 
-// handleAdd 添加节点
+// handleAdd 添加节点（支持自动命名）
 func (b *Bot) handleAdd(chatID int64, args []string) {
-	if len(args) < 3 {
-		b.reply(chatID, "❌ 参数错误\n用法: /add <name> <host> <weight>\n例如: /add node1 http://1.2.3.4:80 100")
+	if len(args) < 1 {
+		b.reply(chatID, "❌ 参数错误\n用法: /add <host> [weight]\n例如: /add http://1.2.3.4:80\n或: /add http://1.2.3.4:80 100")
 		return
 	}
 
-	name := args[0]
-	host := args[1]
+	host := args[0]
 	weight := 100
 
-	// 解析权重
-	if len(args) >= 3 {
-		fmt.Sscanf(args[2], "%d", &weight)
+	// 解析权重（可选）
+	if len(args) >= 2 {
+		fmt.Sscanf(args[1], "%d", &weight)
 	}
 
 	// 验证权重
@@ -173,9 +187,9 @@ func (b *Bot) handleAdd(chatID int64, args []string) {
 		return
 	}
 
-	// 添加节点
+	// 添加节点（名称自动生成）
 	newNode := config.Node{
-		Name:    name,
+		Name:    "", // 空字符串，Manager 会自动生成
 		Host:    host,
 		Weight:  weight,
 		Enabled: true,
@@ -186,7 +200,17 @@ func (b *Bot) handleAdd(chatID int64, args []string) {
 		return
 	}
 
-	b.reply(chatID, fmt.Sprintf("✅ 节点 %s 添加成功\n正在进行健康检查...", name))
+	// 获取生成的节点名称
+	nodes := b.nodeManager.ListNodes()
+	var addedName string
+	for _, node := range nodes {
+		if node.Host == host {
+			addedName = node.Name
+			break
+		}
+	}
+
+	b.reply(chatID, fmt.Sprintf("✅ 节点添加成功\n• 名称: %s\n• 主机: %s\n• 权重: %d\n正在进行健康检查...", addedName, host, weight))
 }
 
 // handleDelete 删除节点
@@ -280,6 +304,65 @@ func (b *Bot) handleStatus(chatID int64) {
 	))
 
 	b.replyMarkdown(chatID, sb.String())
+}
+
+// handleBatchAdd 批量添加节点
+func (b *Bot) handleBatchAdd(chatID int64, args []string) {
+	if len(args) < 1 {
+		b.reply(chatID, "❌ 参数错误\n用法: /batchadd <host1> <host2> ...\n例如: /batchadd http://1.2.3.4:80 http://5.6.7.8:80:50")
+		return
+	}
+
+	successCount, failedHosts, err := b.nodeManager.BatchAddNodes(args)
+
+	var sb strings.Builder
+	if successCount > 0 {
+		sb.WriteString(fmt.Sprintf("✅ 成功添加 %d 个节点\n\n", successCount))
+	}
+
+	if len(failedHosts) > 0 {
+		sb.WriteString(fmt.Sprintf("⚠️ 失败 %d 个节点:\n", len(failedHosts)))
+		for _, host := range failedHosts {
+			sb.WriteString(fmt.Sprintf("• %s\n", host))
+		}
+	}
+
+	if err != nil && successCount == 0 {
+		b.reply(chatID, fmt.Sprintf("❌ 批量添加失败: %v", err))
+		return
+	}
+
+	sb.WriteString("\n正在进行健康检查...")
+	b.reply(chatID, sb.String())
+}
+
+// handleBatchDelete 批量删除节点
+func (b *Bot) handleBatchDelete(chatID int64, args []string) {
+	if len(args) < 1 {
+		b.reply(chatID, "❌ 参数错误\n用法: /batchdel <name1> <name2> ...\n例如: /batchdel node1 node2")
+		return
+	}
+
+	deletedCount, failedNames, err := b.nodeManager.BatchDeleteNodes(args)
+
+	var sb strings.Builder
+	if deletedCount > 0 {
+		sb.WriteString(fmt.Sprintf("✅ 成功删除 %d 个节点\n\n", deletedCount))
+	}
+
+	if len(failedNames) > 0 {
+		sb.WriteString(fmt.Sprintf("⚠️ 失败 %d 个节点（不存在）:\n", len(failedNames)))
+		for _, name := range failedNames {
+			sb.WriteString(fmt.Sprintf("• %s\n", name))
+		}
+	}
+
+	if err != nil && deletedCount == 0 {
+		b.reply(chatID, fmt.Sprintf("❌ 批量删除失败: %v", err))
+		return
+	}
+
+	b.reply(chatID, sb.String())
 }
 
 // reply 发送普通消息

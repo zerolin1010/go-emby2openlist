@@ -51,6 +51,11 @@ func ReadFromFile(path string) error {
 		return fmt.Errorf("初始化 BasePath 失败: %v", err)
 	}
 
+	// 设置配置文件路径（用于后续保存）
+	if err = SetConfigPath(path); err != nil {
+		return fmt.Errorf("设置配置文件路径失败: %v", err)
+	}
+
 	C = new(Config)
 	if err := yaml.Unmarshal(bytes, C); err != nil {
 		return fmt.Errorf("解析配置文件失败: %v", err)
