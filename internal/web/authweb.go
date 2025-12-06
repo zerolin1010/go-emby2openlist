@@ -59,9 +59,11 @@ func ListenAuthServer(cache *userkey.Cache) error {
 
 		// 视频鉴权接口（方案1：应用层签名）
 		api.GET("/video-auth/*path", videoAuthService.HandleVideoAuth)
+		api.HEAD("/video-auth/*path", videoAuthService.HandleVideoAuth)
 
 		// 令牌验证接口（供 Nginx auth_request 使用）
 		api.GET("/verify-token", videoAuthService.HandleVerifyToken)
+		api.HEAD("/verify-token", videoAuthService.HandleVerifyToken)
 
 		// 健康检查
 		api.GET("/health", func(c *gin.Context) {
