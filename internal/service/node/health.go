@@ -3,6 +3,7 @@ package node
 import (
 	"context"
 	"net/http"
+	"net/url"
 	"sync"
 	"time"
 
@@ -108,9 +109,13 @@ func (hc *HealthChecker) checkNode(node *NodeStatus) {
 	ctx, cancel := context.WithTimeout(context.Background(), hc.timeout)
 	defer cancel()
 
+	// 构建健康检查 URL
+	// 健康检查固定使用 80 端口（从 node.Host 提取 IP/域名）
+	healthCheckURL := buildHealthCheckURL(node.Host)
+
 	// 构建健康检查请求
-	// curl -v -H "Host: gtm-health" http://<IP>/gtm-health
-	req, err := http.NewRequestWithContext(ctx, "GET", node.Host+"/gtm-health", nil)
+	// curl -v -H "Host: gtm-health" http://<IP>:80/gtm-health
+	req, err := http.NewRequestWithContext(ctx, "GET", healthCheckURL, nil)
 	if err != nil {
 		hc.markUnhealthy(node)
 		return
@@ -161,6 +166,33 @@ func (hc *HealthChecker) markUnhealthy(node *NodeStatus) {
 		node.Healthy = false
 		logs.Error("节点 %s 标记为不健康", node.Name)
 	}
+}
+
+// buildHealthCheckURL 构建健康检查 URL
+// 从节点 Host 提取 scheme 和 hostname，固定使用 80 端口
+// 例如: http://1.2.3.4:46621 -> http://1.2.3.4:80/gtm-health
+func buildHealthCheckURL(nodeHost string) string {
+	u, err := url.Parse(nodeHost)
+	if err != nil {
+		// 解析失败，直接拼接（兼容旧逻辑）
+		return nodeHost + "/gtm-health"
+	}
+
+	// 提取 scheme (http/https)
+	scheme := u.Scheme
+	if scheme == "" {
+		scheme = "http"
+	}
+
+	// 提取 hostname (IP 或域名)
+	hostname := u.Hostname()
+	if hostname == "" {
+		// 如果无法提取，使用原 Host（兼容）
+		return nodeHost + "/gtm-health"
+	}
+
+	// 固定使用 80 端口进行健康检查
+	return scheme + "://" + hostname + ":80/gtm-health"
 }
 
 // GetHealthyNodes 获取所有健康节点
