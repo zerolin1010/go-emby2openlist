@@ -271,6 +271,12 @@ func (s *VideoAuthService) isNodeHealthy(requestHost string) bool {
 	// 获取所有节点
 	allNodes := s.healthChecker.GetAllNodes()
 
+	// 提取请求的 IP 地址（忽略端口号）
+	requestIP := requestHost
+	if host, _, err := net.SplitHostPort(requestHost); err == nil {
+		requestIP = host
+	}
+
 	// 遍历查找匹配的节点
 	for _, nodeStatus := range allNodes {
 		// 解析节点的 Host
@@ -279,8 +285,11 @@ func (s *VideoAuthService) isNodeHealthy(requestHost string) bool {
 			continue
 		}
 
-		// 比较 Host（支持 IP:Port 和域名:Port）
-		if nodeURL.Host == requestHost || nodeStatus.GetHost() == requestHost {
+		// 提取节点的 IP 地址（忽略端口号）
+		nodeIP := nodeURL.Hostname()
+
+		// 比较 IP 地址（忽略端口号）
+		if nodeIP == requestIP || nodeURL.Host == requestHost || nodeStatus.GetHost() == requestHost {
 			// 找到匹配的节点，返回健康状态
 			isHealthy := nodeStatus.IsHealthy()
 			if !isHealthy {
