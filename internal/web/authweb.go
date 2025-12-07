@@ -18,7 +18,7 @@ var (
 )
 
 // ListenAuthServer 启动鉴权服务器
-func ListenAuthServer(cache *userkey.Cache, healthChecker *node.HealthChecker) error {
+func ListenAuthServer(cache *userkey.Cache, healthChecker *node.HealthChecker, nodeSelector *node.Selector) error {
 	if !config.C.Auth.EnableAuthServer {
 		logs.Info("鉴权服务器未启用")
 		return nil
@@ -38,8 +38,8 @@ func ListenAuthServer(cache *userkey.Cache, healthChecker *node.HealthChecker) e
 	// 初始化鉴权服务器
 	authServerInstance = authserver.NewServer(cache, config.C.Emby, accessLogger)
 
-	// 初始化视频鉴权服务（传入健康检查器，用于故障转移）
-	videoAuthService = videoauth.NewVideoAuthService(cache, config.C.Emby, healthChecker)
+	// 初始化视频鉴权服务（传入健康检查器和节点选择器，用于故障转移）
+	videoAuthService = videoauth.NewVideoAuthService(cache, config.C.Emby, healthChecker, nodeSelector)
 
 	// 创建 Gin 引擎
 	r := gin.New()

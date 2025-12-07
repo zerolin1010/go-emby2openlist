@@ -1,361 +1,302 @@
-# Range 请求优化方案
+# Range 请求优化指南
 
-## 📊 问题分析
+## 📋 问题背景
 
-### 现象
-用户报告在 v2.5.1 之后，视频播放不再使用小分片请求，而是出现巨大的单个 Range 请求：
+您提到的问题：**"现在改版之后只有一个完整体积的长链接了，可能是受限于鉴权机制"**
 
-```
-Content-Range: bytes 557056-102682361360/102682361361
-Content-Length: 102681804305  (约 95.6 GB!!!)
-```
-
-### 根本原因
-
-**这不是服务器配置的问题，而是客户端行为的变化：**
-
-1. **Nginx 配置未变化** - v2.5.0 和 v2.5.1 的 Nginx 配置完全相同
-2. **客户端请求策略改变** - Emby 播放器发送了 `Range: bytes=557056-`（开放式 Range）
-3. **Nginx 正确响应** - 返回了从 557056 到文件末尾的所有内容
-
-**可能触发原因：**
-- 播放器检测到网络稳定，采用"贪婪缓冲"策略
-- 浏览器或 Emby 客户端更新，缓冲策略变化
-- 直接播放原始 MKV 文件（未启用 HLS 转码）
+实际情况分析：
+1. **Range 请求仍然正常工作**（从日志可以看到 206 响应和分片请求）
+2. **某些请求的 Range 很大**（如 2.3GB 的单次请求）是**客户端决定的**，不是服务端问题
+3. **鉴权机制不影响分片**（每个 Range 请求都会经过 auth_request 验证）
 
 ---
 
-## ⚠️ 巨大 Range 请求的问题
+## 🔍 Range 请求分析
 
-### 1. 网络中断风险高
-- 95.6 GB 的单个请求如果中断，需要重新下载
-- 浪费带宽和时间
+### 实际日志分析
 
-### 2. 单个连接占用过多资源
-- Nginx 需要维护长时间连接
-- 缓冲区占用更多内存
-- 其他用户可能受影响
+从您的 Nginx 日志可以看到：
 
-### 3. 播放器缓冲策略失效
-- 无法灵活控制下载进度
-- 可能下载大量用户不会观看的内容
-
-### 4. 故障转移困难
-- 一旦开始下载，无法切换到其他节点
-- 节点故障会导致播放中断
-
----
-
-## ✅ 解决方案
-
-### 方案 1：Nginx 限速（推荐 ✅）
-
-通过限制下载速率，强制播放器分批请求：
-
-```nginx
-location ~ ^/internal/(data|data1|...)$ {
-    # ... 现有配置 ...
-
-    # 限制下载速率
-    # 前 50 MB 不限速（快速启动播放）
-    limit_rate_after 50m;
-    # 之后限制为 50 MB/s（足够 4K 播放）
-    limit_rate 50m;
-
-    # 连接超时设置
-    send_timeout 300s;  # 5 分钟无数据传输则断开
-    keepalive_timeout 300s;
-}
 ```
-
-**效果**：
-- ✅ 快速启动播放（前 50 MB 全速）
-- ✅ 防止单个连接占用过多带宽
-- ✅ 播放器会因为限速而重新发起新的 Range 请求
-- ✅ 多用户并发时更公平
-
-**性能计算**：
-- 50 MB/s = 400 Mbps（足够播放 4K 视频）
-- 10 个并发用户 = 500 MB/s（4 Gbps）
-
----
-
-### 方案 2：调整播放器设置
-
-在 Emby 中配置播放器行为：
-
-**步骤**：
-1. Emby 设置 → 播放
-2. 选择播放器：Web 播放器
-3. 缓冲策略：选择"自适应"或"较小缓冲"
-4. 预加载设置：调整预加载大小
-
-**效果**：
-- 播放器会发送更小的 Range 请求
-- 但需要每个用户单独配置
-
----
-
-### 方案 3：启用 HLS 转码（长期方案）
-
-让 Emby 自动将大文件转换为 HLS 分片：
-
-**配置**：
-1. Emby 设置 → 转码
-2. 启用 HLS 转码
-3. 设置分片大小（2-10 秒）
-
-**优点**：
-- ✅ 自动分割为小片段
-- ✅ 每个片段独立鉴权
-- ✅ 支持自适应码率
-- ✅ 降低网络中断风险
-
-**缺点**：
-- ❌ 增加 CPU 负载（转码）
-- ❌ 需要存储空间（转码缓存）
-- ❌ 启动延迟增加（首次转码）
-
----
-
-## 🔄 故障转移机制
-
-### 当前机制（v2.5.1）
-
-#### 初始重定向阶段 ✅
-```go
-// 选择健康节点
-selectedNode := nodeSelector.SelectNode()
-if selectedNode == nil {
-    // 没有健康节点 → 回源到 Emby
-    ProxyOrigin(c)
-    return
-}
-
-// 返回 302 重定向到健康节点
-c.Redirect(http.StatusTemporaryRedirect, nodeURL)
-```
-
-**效果**：
-- ✅ 只会重定向到健康节点
-- ✅ 如果所有节点不健康，回源到 Emby
-
-#### 播放过程中 ❌
-- 302 重定向完成后，所有 Range 请求直接发送到该节点
-- **如果该节点在播放过程中变得不健康，无法自动切换**
-- 用户需要手动刷新或重新加载视频
-
----
-
-### 改进方案：播放过程中的自动故障转移
-
-#### 方案 A：Nginx upstream 健康检查
-
-使用 Nginx Plus 或开源模块 `nginx_upstream_check_module`：
-
-```nginx
-upstream video_nodes {
-    server 192.168.1.10:80 max_fails=3 fail_timeout=30s;
-    server 192.168.1.11:80 max_fails=3 fail_timeout=30s;
-
-    # 健康检查（需要 nginx_upstream_check_module）
-    check interval=3000 rise=2 fall=3 timeout=1000 type=http;
-    check_http_send "GET /gtm-health HTTP/1.0\r\n\r\n";
-    check_http_expect_alive http_2xx http_3xx;
-}
-
-location ~ ^/internal/ {
-    # 使用 upstream，自动故障转移
-    proxy_pass http://video_nodes;
-    proxy_next_upstream error timeout http_502 http_503 http_504;
-}
-```
-
-**效果**：
-- ✅ 自动检测节点健康状态
-- ✅ 播放过程中自动切换到健康节点
-- ✅ 用户无感知
-
-**缺点**：
-- ❌ 需要重新设计架构（从直接文件服务改为 proxy）
-- ❌ 增加网络跳转（性能损失）
-
----
-
-#### 方案 B：客户端侧重试机制
-
-在客户端（Emby 播放器）配置重试策略：
-
-**步骤**：
-1. Emby 设置 → 播放
-2. 网络设置 → 启用自动重试
-3. 重试次数：3 次
-4. 重试延迟：5 秒
-
-**效果**：
-- ✅ Range 请求失败后自动重试
-- ✅ 可能触发重新 302 重定向（选择新节点）
-
-**缺点**：
-- ❌ 依赖客户端支持
-- ❌ 可能会重新请求相同的不健康节点
-
----
-
-#### 方案 C：Token 续期时检测节点健康（推荐 ✅）
-
-修改 v2.5.1 的 Token 自动续期逻辑，在续期时检测节点健康：
-
-```go
-func (s *VideoAuthService) HandleVerifyToken(c *gin.Context) {
-    // ... 现有验证逻辑 ...
-
-    // 检查当前节点是否健康
-    currentNode := s.findNodeByHost(c.Request.Host)
-    if currentNode != nil && !s.healthChecker.IsHealthy(currentNode) {
-        // 节点不健康 → 拒绝续期 → 强制客户端重新 302 重定向
-        logs.Warn("[TokenVerify] 节点不健康，拒绝续期: %s", currentNode.Name)
-        c.Status(http.StatusForbidden)
-        return
-    }
-
-    // 节点健康 → 正常续期
-    s.playingSessions.Set(sessionKey, ...)
-    c.Status(http.StatusOK)
-}
-```
-
-**效果**：
-- ✅ 播放过程中检测节点健康
-- ✅ 节点不健康时，拒绝 auth_request → 403 错误
-- ✅ Emby 播放器收到 403 后，重新请求 → 触发新的 302 重定向
-- ✅ 自动切换到健康节点
-
-**优点**：
-- 利用现有的 Token 续期机制
-- 无需修改 Nginx 配置
-- 对用户透明（短暂缓冲后恢复）
-
-**缺点**：
-- 需要修改 Go 代码
-- 短暂的播放中断（重新 302 重定向）
-
----
-
-## 🚀 推荐部署方案
-
-### 立即部署（Nginx 限速）
-
-```bash
-# 1. 更新 Nginx 配置
-cd /usr/local/go-emby2openlist
-git pull && git checkout v2.5.1
-
-# 2. 复制最新配置
-cp nginx/video-gateway-URL-DECODE-FIX.conf /etc/nginx/sites-available/video-gateway.conf
-
-# 3. 测试配置
-nginx -t
-
-# 4. 重新加载
-nginx -s reload
-```
-
-**验证**：
-```bash
-# 查看 Nginx 配置是否包含限速
-cat /etc/nginx/sites-available/video-gateway.conf | grep limit_rate
-# 应输出:
-# limit_rate_after 50m;
-# limit_rate 50m;
-```
-
----
-
-### 长期优化（故障转移）
-
-**选项 1**：等待我实现方案 C（Token 续期时检测节点健康）
-
-**选项 2**：手动配置 Nginx upstream 健康检查（复杂，不推荐）
-
-**选项 3**：启用 Emby HLS 转码（简单，但增加 CPU 负载）
-
----
-
-## 📊 性能影响分析
-
-### 限速前（无限制）
-```
-单个用户: 可能占用全部带宽（1 Gbps+）
-95.6 GB 文件: 传输时间 ~13 分钟（@ 100 MB/s）
-10 个并发用户: 可能导致带宽耗尽
-```
-
-### 限速后（50 MB/s）
-```
-单个用户: 最大 50 MB/s（400 Mbps）
-4K 视频需求: 约 25 Mbps（完全足够）
-95.6 GB 文件: 传输时间 ~32 分钟
-10 个并发用户: 总带宽 500 MB/s（4 Gbps）
+206 65536        ← 64KB 小分片（初始探测）
+206 40508898     ← 38MB 分片（正常播放）
+206 1209080      ← 1.1MB 分片（音频轨道或字幕）
+206 2368287638   ← 2.2GB 大分片（⚠️ 客户端拖动进度条）
+206 142662373    ← 136MB 分片（正常播放）
 ```
 
 **结论**：
-- ✅ 单用户体验不受影响（50 MB/s 远超 4K 需求）
-- ✅ 多用户并发更公平
-- ✅ 避免单个连接占用过多资源
+- ✅ 多个小分片请求（正常播放）
+- ⚠️ 偶尔有大分片请求（用户快进/拖动进度条）
+
+**大分片的原因**：
+1. 用户拖动进度条到后面
+2. 客户端缓存策略（Chrome 会请求较大的 Range）
+3. 播放器预加载设置
 
 ---
 
-## 🔍 故障排查
+## 🎯 优化方案
 
-### 问题 1：仍然出现巨大 Range 请求
+### 方案 1：速率限制（已实现，推荐）
 
-**排查**：
+**当前配置**：
+```nginx
+limit_rate_after 50m;  # 前 50MB 不限速
+limit_rate 50m;        # 之后限速为 50MB/s
+```
+
+**效果**：
+- ✅ 不影响正常播放（前 50MB 快速加载）
+- ✅ 限制单个连接带宽（避免占用过多资源）
+- ✅ 即使请求 2GB，实际传输速度也受限
+- ⚠️ 不减少请求数量，只控制传输速度
+
+**适用场景**：
+- 多用户并发播放
+- 带宽有限的服务器
+- 需要公平分配带宽
+
+**调整方法**（编辑 Nginx 配置）：
+```nginx
+# 更宽松（高带宽服务器）
+limit_rate_after 100m;
+limit_rate 100m;
+
+# 更严格（低带宽/多用户）
+limit_rate_after 20m;
+limit_rate 20m;
+```
+
+---
+
+### 方案 2：并发连接限制（推荐添加）
+
+**限制单个 IP 的并发连接数**：
+
+```nginx
+# 1. 在 nginx.conf 的 http 块中添加
+http {
+    limit_conn_zone $binary_remote_addr zone=perip:10m;
+}
+
+# 2. 在 location 中应用
+location ~ ^/internal/(data[^/]*)/(.*)$ {
+    limit_conn perip 5;  # 限制单个 IP 最多 5 个并发连接
+    # ... 其他配置 ...
+}
+```
+
+**效果**：
+- ✅ 防止单个用户打开过多连接
+- ✅ 保护服务器资源
+- ⚠️ 可能影响多设备同时播放
+
+---
+
+### 方案 3：连接超时控制（已实现）
+
+**当前配置**：
+```nginx
+send_timeout 300s;     # 5分钟无数据传输则断开
+keepalive_timeout 300s;
+```
+
+**效果**：
+- ✅ 自动断开长时间无活动的连接
+- ✅ 释放服务器资源
+- ⚠️ 用户暂停播放超过5分钟会断开
+
+**调整建议**：
+```nginx
+# 短超时（节省资源，但可能影响暂停播放）
+send_timeout 120s;
+keepalive_timeout 120s;
+
+# 长超时（用户体验好，但占用资源）
+send_timeout 600s;
+keepalive_timeout 600s;
+```
+
+---
+
+## 📊 推荐配置
+
+### 配置 A：平衡型（推荐，适合大部分场景）
+
+```nginx
+location ~ ^/internal/(data[^/]*)/(.*)$ {
+    # ... 鉴权配置 ...
+
+    # 速率限制
+    limit_rate_after 50m;
+    limit_rate 50m;
+
+    # 连接超时
+    send_timeout 300s;
+    keepalive_timeout 300s;
+
+    # 并发限制（需要在 http 块中先定义 limit_conn_zone）
+    limit_conn perip 5;
+
+    root $root_path;
+}
+```
+
+**特点**：
+- ✅ 限制单连接带宽（50MB/s）
+- ✅ 限制单 IP 并发连接（5个）
+- ✅ 自动断开无活动连接（5分钟）
+- ✅ 资源开销低，用户体验好
+
+---
+
+### 配置 B：高性能型（大带宽服务器，少量用户）
+
+```nginx
+location ~ ^/internal/(data[^/]*)/(.*)$ {
+    # 更高的速率限制
+    limit_rate_after 100m;
+    limit_rate 100m;
+
+    # 更长的超时
+    send_timeout 600s;
+    keepalive_timeout 600s;
+
+    # 更宽松的并发限制
+    limit_conn perip 10;
+
+    root $root_path;
+}
+```
+
+---
+
+### 配置 C：资源节约型（低带宽/多用户）
+
+```nginx
+location ~ ^/internal/(data[^/]*)/(.*)$ {
+    # 较低的速率限制
+    limit_rate_after 20m;
+    limit_rate 20m;
+
+    # 较短的超时
+    send_timeout 180s;
+    keepalive_timeout 180s;
+
+    # 严格的并发限制
+    limit_conn perip 3;
+
+    root $root_path;
+}
+```
+
+---
+
+## 🧪 测试和监控
+
+### 查看当前 Range 请求分布
+
 ```bash
-# 检查 Nginx 配置是否生效
-cat /etc/nginx/sites-available/video-gateway.conf | grep -A 3 "limit_rate"
+# 统计不同大小的 Range 响应
+awk '{print $10}' /var/log/nginx/video_internal_access.log | sort -n | uniq -c | tail -20
 
-# 查看 Nginx 日志
+# 查看最大的 Range 响应
+awk '{print $10}' /var/log/nginx/video_internal_access.log | sort -n | tail -10
+
+# 统计平均响应大小
+awk '{sum+=$10; count++} END {print "平均: " sum/count/1024/1024 " MB/请求"}' /var/log/nginx/video_internal_access.log
+```
+
+### 监控并发连接数
+
+```bash
+# 查看当前活跃连接
+netstat -an | grep :7777 | grep ESTABLISHED | wc -l
+
+# 查看每个 IP 的连接数
+netstat -an | grep :7777 | awk '{print $5}' | cut -d: -f1 | sort | uniq -c | sort -rn
+```
+
+### 监控传输速率
+
+```bash
+# 实时查看访问日志
 tail -f /var/log/nginx/video_internal_access.log
-```
 
-**解决**：
-```bash
-# 确保配置重新加载
-nginx -s reload
-
-# 如果不生效，重启 Nginx
-systemctl restart nginx
+# 统计最近 100 个请求的总流量
+tail -100 /var/log/nginx/video_internal_access.log | awk '{sum+=$10} END {print sum/1024/1024/1024 " GB"}'
 ```
 
 ---
 
-### 问题 2：播放过程中节点故障，视频卡住
+## ❓ 常见问题
 
-**现象**：
-- 视频播放一段时间后突然卡住
-- 无限加载，不恢复
+### Q1：为什么有些请求很大（2GB）？
 
-**临时解决**：
-- 用户手动刷新页面
-- 或跳转到其他时间点（触发新的 302 重定向）
+**A**：这是客户端决定的，常见原因：
+1. 用户拖动进度条到视频后半部分（Range: bytes=2000000000-4000000000）
+2. Chrome 的预加载策略（请求大 Range 但不一定全部下载）
+3. 播放器的缓存逻辑
 
-**永久解决**：
-- 等待方案 C 实现（Token 续期时检测节点健康）
-- 或启用 Emby 自动重试功能
+**重要**：Nginx 日志显示的是**响应大小**，不是请求的 Range。即使客户端请求 Range: bytes=0-2GB，如果启用了 `limit_rate 50m`，实际传输速度也受限为 50MB/s。
+
+### Q2：鉴权机制会影响分片吗？
+
+**A**：不会。每个 Range 请求都会：
+1. 触发 `auth_request` 验证 token
+2. 验证通过后，Nginx 返回对应的 Range 数据
+3. 会话续期机制保证长时间播放不中断
+
+**鉴权只影响访问权限，不影响分片逻辑**。客户端可以自由决定 Range 大小。
+
+### Q3：如何直接限制单个请求的最大 Range？
+
+**A**：Nginx **不支持**直接限制 Range 请求的大小。这是因为 Range 是 HTTP 协议的一部分，由客户端控制。
+
+**替代方案**：
+1. **速率限制**：控制传输速度，即使 Range 很大，传输也受限
+2. **连接超时**：限制传输时间，自动断开长时间传输
+3. **并发限制**：限制同时连接数，间接控制总流量
+
+### Q4：Nginx Slice 模块能解决问题吗？
+
+**A**：Slice 模块主要用于**缓存场景**，不适合直接服务文件的场景：
+
+```nginx
+# Slice 模块用法（需要配合 proxy_cache）
+slice 100m;
+proxy_cache video_cache;
+proxy_cache_key $uri$is_args$args$slice_range;
+proxy_set_header Range $slice_range;
+```
+
+**限制**：
+- ❌ 需要 Nginx 作为反向代理
+- ❌ 当前架构是直接 `root` 读取文件，不能使用 slice
+- ❌ 即使使用，也只是强制缓存分片，不改变客户端请求
 
 ---
 
 ## 📝 总结
 
-| 问题 | 当前状态 | 解决方案 | 优先级 |
-|------|----------|----------|--------|
-| 巨大 Range 请求 | ❌ 存在 | Nginx 限速 | **高** |
-| 单连接占用过多带宽 | ❌ 存在 | Nginx 限速 | **高** |
-| 初始重定向选择不健康节点 | ✅ 已解决 | nodeSelector.SelectNode() | - |
-| 播放中节点故障无法转移 | ❌ 未实现 | Token 续期时检测健康 | 中 |
+**当前状态**：
+- ✅ Range 请求正常工作（多个 206 响应）
+- ✅ 已启用速率限制（50MB/s）
+- ✅ 已设置连接超时（5分钟）
+- ⚠️ 偶尔有大 Range 请求（客户端行为）
 
-**立即行动**：
-1. ✅ 部署 Nginx 限速配置
-2. ⏳ 监控效果，观察 Range 请求大小
-3. ⏳ 评估是否需要实现方案 C（故障转移）
+**建议操作**：
+1. **保持当前配置**（如果带宽充足，用户体验良好）
+2. **添加并发限制**（如果多用户并发，防止单用户占用过多资源）
+3. **调整速率限制**（根据实际带宽和用户需求）
+
+**不需要的操作**：
+- ❌ 不需要修改鉴权逻辑（鉴权不影响分片）
+- ❌ 不需要强制分片（客户端自己会分片）
+- ❌ 不需要担心大 Range 请求（速率限制已经控制了传输速度）
+
+**关键理解**：
+> Nginx 日志中的大数字（如 2368287638）是**实际传输的字节数**，不是瞬间传输的。如果启用了 `limit_rate 50m`，这 2.2GB 数据实际需要约 44 秒才能传输完成（2200MB ÷ 50MB/s）。所以即使单个请求很大，也不会瞬间占用全部带宽。
+
+需要我帮您应用某个具体的配置吗？例如添加并发连接限制？

@@ -28,10 +28,11 @@ type VideoAuthService struct {
 	uidCache        *userkey.Cache     // UID 到 api_key 的映射缓存
 	playingSessions *userkey.Cache     // 播放会话跟踪（token -> 最后活跃时间）
 	healthChecker   *node.HealthChecker // 节点健康检查器（用于故障转移）
+	nodeSelector    *node.Selector     // 节点选择器（用于选择新节点）
 }
 
 // NewVideoAuthService 创建视频鉴权服务
-func NewVideoAuthService(cache *userkey.Cache, cfg *config.Emby, healthChecker *node.HealthChecker) *VideoAuthService {
+func NewVideoAuthService(cache *userkey.Cache, cfg *config.Emby, healthChecker *node.HealthChecker, nodeSelector *node.Selector) *VideoAuthService {
 	return &VideoAuthService{
 		cache:           cache,
 		embyHost:        cfg.Host,
@@ -41,6 +42,7 @@ func NewVideoAuthService(cache *userkey.Cache, cfg *config.Emby, healthChecker *
 		uidCache:        userkey.NewCache(10 * time.Minute), // UID 缓存有效期 10 分钟
 		playingSessions: userkey.NewCache(30 * time.Minute), // 播放会话缓存 30 分钟
 		healthChecker:   healthChecker,                      // 节点健康检查器
+		nodeSelector:    nodeSelector,                       // 节点选择器
 	}
 }
 
@@ -109,6 +111,18 @@ func (s *VideoAuthService) HandleVerifyToken(c *gin.Context) {
 		return
 	}
 
+	// 1.5. 检查故障转移重试次数（防止无限重定向）
+	retryCount := 0
+	if retryStr := c.Query("_retry"); retryStr != "" {
+		fmt.Sscanf(retryStr, "%d", &retryCount)
+	}
+	const maxRetries = 3
+	if retryCount >= maxRetries {
+		logs.Error("[TokenVerify] 故障转移重试次数超限 (%d 次)，拒绝访问，路径: %s", retryCount, path)
+		c.Status(http.StatusServiceUnavailable)
+		return
+	}
+
 	// 2. 解析过期时间
 	var expiresAt int64
 	fmt.Sscanf(expiresStr, "%d", &expiresAt)
@@ -143,16 +157,30 @@ func (s *VideoAuthService) HandleVerifyToken(c *gin.Context) {
 	sessionKey := fmt.Sprintf("%s:%s", token, uid)
 
 	// 检查当前节点是否健康（实现自动故障转移）
-	if s.healthChecker != nil {
+	if s.healthChecker != nil && s.nodeSelector != nil {
 		requestHost := c.Request.Host
 		isHealthy := s.isNodeHealthy(requestHost)
 		if !isHealthy {
-			// 节点不健康 → 拒绝续期 → 强制客户端重新 302 重定向
-			logs.Warn("[TokenVerify] 节点不健康，拒绝访问，强制重新选择节点: %s, 路径: %s, IP: %s",
+			// 节点不健康 → 307 重定向到新节点 → 无缝故障转移
+			logs.Warn("[TokenVerify] 节点不健康，执行故障转移: %s, 路径: %s, IP: %s",
 				requestHost, path, c.ClientIP())
-			// 删除会话，强制重新鉴权
-			s.playingSessions.Delete(sessionKey)
-			c.Status(http.StatusForbidden)
+
+			// 选择新的健康节点
+			newNode := s.nodeSelector.SelectNode()
+			if newNode == nil {
+				logs.Error("[TokenVerify] 没有可用的健康节点，拒绝访问")
+				s.playingSessions.Delete(sessionKey)
+				c.Status(http.StatusServiceUnavailable)
+				return
+			}
+
+			// 重新生成签名 URL（指向新节点）
+			newRedirectURL := s.buildFailoverURL(newNode.Host, path, apiKey, retryCount+1)
+			logs.Info("[TokenVerify] 故障转移到新节点: %s (%s), 重试次数: %d, 新 URL: %s",
+				newNode.Name, newNode.Host, retryCount+1, newRedirectURL)
+
+			// 返回 307 临时重定向（保留 POST/Range 等方法）
+			c.Redirect(http.StatusTemporaryRedirect, newRedirectURL)
 			return
 		}
 	}
@@ -301,4 +329,30 @@ func maskApiKey(apiKey string) string {
 		return "****"
 	}
 	return apiKey[:4] + "****" + apiKey[len(apiKey)-4:]
+}
+
+// buildFailoverURL 构建故障转移 URL
+func (s *VideoAuthService) buildFailoverURL(nodeHost, internalPath, apiKey string, retryCount int) string {
+	// 1. 解析节点地址
+	u, err := url.Parse(nodeHost)
+	if err != nil {
+		logs.Error("[Failover] 解析节点地址失败: %v", err)
+		return ""
+	}
+
+	// 2. 将 /internal/dataX/... 转换为 /video/dataX/...
+	publicPath := strings.Replace(internalPath, "/internal/", "/video/", 1)
+
+	// 3. 设置路径
+	u.Path = publicPath
+
+	// 4. 添加 api_key 和 _retry 参数
+	q := u.Query()
+	q.Set("api_key", apiKey)
+	if retryCount > 0 {
+		q.Set("_retry", fmt.Sprintf("%d", retryCount))
+	}
+	u.RawQuery = q.Encode()
+
+	return u.String()
 }

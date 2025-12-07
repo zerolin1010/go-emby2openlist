@@ -54,7 +54,7 @@ func main() {
 	// 启动鉴权服务器（如果启用）
 	if config.C.Auth.EnableAuthServer {
 		logs.Info("正在启动鉴权服务器...")
-		if err := web.ListenAuthServer(keyCache, healthChecker); err != nil {
+		if err := web.ListenAuthServer(keyCache, healthChecker, nodeSelector); err != nil {
 			logs.Error("鉴权服务器启动失败: %v", err)
 		}
 	}
