@@ -283,16 +283,22 @@ func (s *VideoAuthService) isNodeHealthy(requestHost string) bool {
 		// 解析节点的 Host
 		nodeURL, err := url.Parse(nodeStatus.GetHost())
 		if err != nil {
+			logs.Warn("[VideoAuth] 解析节点 URL 失败: %s, error: %v", nodeStatus.GetHost(), err)
 			continue
 		}
 
 		// 提取节点的 IP 地址（忽略端口号）
 		nodeIP := nodeURL.Hostname()
 
+		// 调试日志
+		logs.Debug("[VideoAuth] 比较节点: requestIP=%s, nodeIP=%s, requestHost=%s, nodeHost=%s",
+			requestIP, nodeIP, requestHost, nodeURL.Host)
+
 		// 比较 IP 地址（忽略端口号）
 		if nodeIP == requestIP || nodeURL.Host == requestHost || nodeStatus.GetHost() == requestHost {
 			// 找到匹配的节点，返回健康状态
 			isHealthy := nodeStatus.IsHealthy()
+			logs.Info("[VideoAuth] 匹配到节点: %s (%s), 健康状态: %v", nodeStatus.GetName(), nodeStatus.GetHost(), isHealthy)
 			if !isHealthy {
 				logs.Warn("[VideoAuth] 节点不健康: %s (%s)", nodeStatus.GetName(), nodeStatus.GetHost())
 			}
