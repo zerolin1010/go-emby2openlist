@@ -158,7 +158,12 @@ func (s *VideoAuthService) HandleVerifyToken(c *gin.Context) {
 
 	// 检查当前节点是否健康（实现自动故障转移）
 	if s.healthChecker != nil && s.nodeSelector != nil {
-		requestHost := c.Request.Host
+		// 优先使用 Nginx 传递的 X-Node-Host 头（包含端口号）
+		// 如果不存在，降级使用 Host 头
+		requestHost := c.GetHeader("X-Node-Host")
+		if requestHost == "" {
+			requestHost = c.Request.Host
+		}
 		isHealthy := s.isNodeHealthy(requestHost)
 		if !isHealthy {
 			// 节点不健康 → 307 重定向到新节点 → 无缝故障转移
