@@ -36,13 +36,13 @@ func main() {
 
 	printBanner()
 
-	// 初始化节点健康检查
-	logs.Info("正在初始化节点健康检查模块...")
-	healthChecker := node.NewHealthChecker(config.C.Nodes)
-	go healthChecker.Start()
+	// ============================================================
+	// 测试分支：禁用节点健康检查和负载均衡
+	// 改用固定前置代理 URL (config.yml: auth.fixed-proxy-url)
+	// ============================================================
 
-	// 初始化节点选择器
-	nodeSelector := node.NewSelector(healthChecker)
+	// 初始化节点选择器（仅用于非固定代理模式的兼容性）
+	nodeSelector := node.NewSelector(nil)
 
 	// 初始化用户 Key 缓存
 	logs.Info("正在初始化用户 Key 缓存模块...")
@@ -54,7 +54,7 @@ func main() {
 	// 启动鉴权服务器（如果启用）
 	if config.C.Auth.EnableAuthServer {
 		logs.Info("正在启动鉴权服务器...")
-		if err := web.ListenAuthServer(keyCache, healthChecker, nodeSelector); err != nil {
+		if err := web.ListenAuthServer(keyCache, nil, nodeSelector); err != nil {
 			logs.Error("鉴权服务器启动失败: %v", err)
 		}
 	}
@@ -62,7 +62,7 @@ func main() {
 	// 启动 Telegram Bot（如果启用）
 	if config.C.Telegram.Enable {
 		logs.Info("正在启动 Telegram Bot...")
-		bot, err := telegram.NewBot(healthChecker)
+		bot, err := telegram.NewBot(nil)
 		if err != nil {
 			logs.Error("Telegram Bot 启动失败: %v", err)
 		} else {
