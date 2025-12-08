@@ -67,6 +67,17 @@ auth:
   enable-auth-server-log: true        # 是否记录访问日志
   auth-server-log-path: "./logs/auth-access.log"  # 访问日志文件路径
 
+  # 固定前置代理 URL 配置（测试功能）
+  # 启用后，302 重定向将使用固定的前置代理 URL，而不是内部路径
+  # 适用场景：简化架构，去除多节点负载均衡，使用单一前置代理
+  #
+  # 示例配置：
+  # fixed-proxy-url: "http://183.179.251.164:7777"    # HTTP 代理
+  # fixed-proxy-url: "https://cdn.example.com"        # HTTPS 代理
+  #
+  # 留空或注释则使用默认行为（内部路径重定向）
+  fixed-proxy-url: ""
+
 # 路径映射配置
 path:
   # Emby 路径到 Nginx 路径的映射
