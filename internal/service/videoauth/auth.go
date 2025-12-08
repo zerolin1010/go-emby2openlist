@@ -86,20 +86,23 @@ func (s *VideoAuthService) HandleVideoAuth(c *gin.Context) {
 	token := s.generateToken(videoPath, apiKey, expiresAt)
 	uid := s.encryptUID(apiKey) // 加密用户标识并缓存映射
 
-	// 4.5. 获取节点主机信息（用于故障转移时准确识别节点）
-	// 优先使用 Nginx 传递的 X-Node-Host 头，如果不存在则使用 Host 头
-	nodeHost := c.GetHeader("X-Node-Host")
-	if nodeHost == "" {
-		nodeHost = c.Request.Host
-	}
-
 	// 5. 记录访问日志
-	logs.Info("[VideoAuth] 鉴权通过，生成临时 URL，用户: %s, 文件: %s, 节点: %s, IP: %s, 耗时: %v",
-		maskApiKey(apiKey), videoPath, nodeHost, c.ClientIP(), time.Since(startTime))
+	logs.Info("[VideoAuth] 鉴权通过，生成临时 URL，用户: %s, 文件: %s, IP: %s, 耗时: %v",
+		maskApiKey(apiKey), videoPath, c.ClientIP(), time.Since(startTime))
 
-	// 6. 构建重定向 URL（包含节点标识，用于故障转移时准确匹配）
-	redirectURL := fmt.Sprintf("%s?token=%s&expires=%d&uid=%s&_node_host=%s",
-		videoPath, token, expiresAt, uid, url.QueryEscape(nodeHost))
+	// 6. 构建重定向 URL
+	var redirectURL string
+	fixedProxyURL := s.getFixedProxyURL()
+	if fixedProxyURL != "" {
+		// 使用固定前置代理 URL（测试模式）
+		redirectURL = fmt.Sprintf("%s%s?token=%s&expires=%d&uid=%s",
+			fixedProxyURL, videoPath, token, expiresAt, uid)
+		logs.Info("[VideoAuth] 使用固定前置代理: %s", fixedProxyURL)
+	} else {
+		// 原有逻辑：直接重定向到内部路径
+		redirectURL = fmt.Sprintf("%s?token=%s&expires=%d&uid=%s",
+			videoPath, token, expiresAt, uid)
+	}
 
 	// 7. 返回 302 重定向
 	c.Redirect(http.StatusFound, redirectURL)
@@ -161,88 +164,8 @@ func (s *VideoAuthService) HandleVerifyToken(c *gin.Context) {
 		return
 	}
 
-	// 6. 自动续期逻辑（基于播放会话）+ 节点健康检查
+	// 6. 自动续期逻辑（基于播放会话）
 	sessionKey := fmt.Sprintf("%s:%s", token, uid)
-
-	// 检查当前节点是否健康（实现自动故障转移）
-	if s.healthChecker != nil && s.nodeSelector != nil {
-		// 优先使用 URL 参数中的 _node_host（在初次鉴权时记录）
-		// 这样即使经过多层 gost 隧道转发改变了 Host 头，也能准确识别原始节点
-		requestHost := c.Query("_node_host")
-		if requestHost == "" {
-			// 降级使用 Nginx 传递的 X-Node-Host 头
-			requestHost = c.GetHeader("X-Node-Host")
-		}
-		if requestHost == "" {
-			// 最后降级使用 Host 头
-			requestHost = c.Request.Host
-		}
-
-		logs.Info("[TokenVerify] 检测到的节点主机: %s (来源: %s)", requestHost,
-			func() string {
-				if c.Query("_node_host") != "" {
-					return "URL参数"
-				} else if c.GetHeader("X-Node-Host") != "" {
-					return "X-Node-Host头"
-				} else {
-					return "Host头"
-				}
-			}())
-
-		isHealthy := s.isNodeHealthy(requestHost)
-		if !isHealthy {
-			// 节点不健康 → 执行故障转移
-			logs.Warn("[TokenVerify] 节点不健康，执行故障转移: %s, 路径: %s, IP: %s",
-				requestHost, path, c.ClientIP())
-
-			// 检测是否来自 Nginx auth_request（通过检查 X-Original-URI 头）
-			// auth_request 调用时 Nginx 会设置这个头
-			isAuthRequest := c.GetHeader("X-Original-URI") != ""
-
-			if isAuthRequest {
-				// 来自 auth_request：不能返回 307（auth_request 不支持重定向）
-				// 返回 403 Forbidden，让 Nginx 拦截并使用 error_page 处理
-				logs.Info("[TokenVerify] 检测到 auth_request 调用，返回 403 触发 Nginx error_page")
-
-				// 选择新的健康节点并在响应头中返回
-				newNode := s.nodeSelector.SelectNode()
-				if newNode == nil {
-					logs.Error("[TokenVerify] 没有可用的健康节点，拒绝访问")
-					s.playingSessions.Delete(sessionKey)
-					c.Status(http.StatusServiceUnavailable)
-					return
-				}
-
-				// 在响应头中返回新节点的 URL（供 Nginx error_page 使用）
-				newRedirectURL := s.buildFailoverURL(newNode.Host, path, apiKey, retryCount+1)
-				c.Header("X-Failover-URL", newRedirectURL)
-				c.Header("X-Failover-Node", newNode.Name)
-				logs.Info("[TokenVerify] auth_request 故障转移: 新节点 %s (%s), URL: %s",
-					newNode.Name, newNode.Host, newRedirectURL)
-
-				c.Status(http.StatusForbidden)
-				return
-			} else {
-				// 直接访问：可以返回 307 重定向
-				newNode := s.nodeSelector.SelectNode()
-				if newNode == nil {
-					logs.Error("[TokenVerify] 没有可用的健康节点，拒绝访问")
-					s.playingSessions.Delete(sessionKey)
-					c.Status(http.StatusServiceUnavailable)
-					return
-				}
-
-				// 重新生成签名 URL（指向新节点）
-				newRedirectURL := s.buildFailoverURL(newNode.Host, path, apiKey, retryCount+1)
-				logs.Info("[TokenVerify] 故障转移到新节点: %s (%s), 重试次数: %d, 新 URL: %s",
-					newNode.Name, newNode.Host, retryCount+1, newRedirectURL)
-
-				// 返回 307 临时重定向（保留 POST/Range 等方法）
-				c.Redirect(http.StatusTemporaryRedirect, newRedirectURL)
-				return
-			}
-		}
-	}
 
 	// 检查是否存在活跃的播放会话
 	if sessionExpiresStr, ok := s.playingSessions.Get(sessionKey); ok {
@@ -465,4 +388,12 @@ func (s *VideoAuthService) buildFailoverURL(nodeHost, internalPath, apiKey strin
 	finalURL := u.String()
 	logs.Info("[Failover] 故障转移URL: %s (新节点 %s)", finalURL, nodeHost)
 	return finalURL
+}
+
+// getFixedProxyURL 获取固定前置代理 URL（测试模式）
+func (s *VideoAuthService) getFixedProxyURL() string {
+	if config.C == nil || config.C.Auth == nil {
+		return ""
+	}
+	return config.C.Auth.FixedProxyURL
 }

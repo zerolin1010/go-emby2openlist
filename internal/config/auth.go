@@ -12,4 +12,7 @@ type Auth struct {
 	AuthServerPort      string `yaml:"auth-server-port"`       // 鉴权服务器端口
 	EnableAuthServerLog bool   `yaml:"enable-auth-server-log"` // 是否启用访问日志
 	AuthServerLogPath   string `yaml:"auth-server-log-path"`   // 访问日志路径
+
+	// 固定前置代理配置（测试用）
+	FixedProxyURL string `yaml:"fixed-proxy-url"` // 固定的前置代理完整 URL，如 "http://cdn.example.com:7777" 或 "https://cdn.example.com"
 }
