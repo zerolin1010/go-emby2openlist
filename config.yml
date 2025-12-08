@@ -1,0 +1,139 @@
+# Emby 服务器配置
+emby:
+  host: http://192.168.0.109:8096            # Emby 访问地址
+  admin-api-key: "your-admin-api-key"        # Emby 管理员 API Key (用于获取用户信息)
+  mount-path: /data                          # Emby 媒体挂载路径
+  episodes-unplay-prior: true                # 是否修改剧集排序, 让未播的剧集靠前排列
+  resort-random-items: true                  # 是否重排序随机列表
+  # 代理异常处理策略
+  # origin: 代理回源服务器处理
+  # reject: 拒绝处理
+  proxy-error-strategy: origin
+  # 图片质量, 默认请求原图
+  # 配置范围: [1, 100]
+  # 建议范围: [70, 90]
+  images-quality: 100
+  strm:                                      # 远程视频 strm 配置
+    # 路径映射, 将 strm 文件内的路径片段替换成指定路径片段
+    path-map:
+      - https://test-res.com:8094 => http://localhost:8095
+      - 12138 => 10086
+    # 是否启用 strm 内部重定向
+    internal-redirect-enable: false
+  # emby 下载接口处理策略
+  #    403: 禁用下载接口, 返回 403 响应
+  # origin: 代理到源服务器
+  # direct: 获取并重定向到直链地址
+  download-strategy: direct
+  # emby 本地媒体根目录
+  # 检测到该路径为前缀的媒体时, 代理回源处理
+  local-media-root: /data/local
+
+# 视频节点配置 (CDN 模式)
+nodes:
+  # 健康检查配置
+  health-check:
+    interval: 30              # 检查间隔 (秒)
+    timeout: 5                # 超时时间 (秒)
+    fail-threshold: 3         # 连续失败次数阈值，达到后标记为不健康
+    success-threshold: 2      # 连续成功次数阈值，达到后恢复健康
+
+  # 节点列表
+  list:
+    - name: "node-1"
+      host: "http://1.2.3.4:80"           # 节点访问地址
+      weight: 100                          # 权重 (1-100)
+      enabled: true                        # 是否启用
+    - name: "node-2"
+      host: "http://5.6.7.8:80"
+      weight: 80
+      enabled: true
+    - name: "node-3"
+      host: "http://9.10.11.12:80"
+      weight: 60
+      enabled: false                       # 禁用的节点不会被使用
+
+# 用户鉴权配置
+auth:
+  # 用户 api_key 缓存过期时间
+  user-key-cache-ttl: 10m
+  # 是否启用 Nginx 端鉴权 (302 URL 携带 api_key 参数)
+  nginx-auth-enable: true
+
+  # 鉴权服务器配置（高级功能）
+  # 启用后，Nginx 可以通过 auth_request 调用本服务进行鉴权
+  enable-auth-server: true            # 是否启用鉴权服务器
+  auth-server-port: "8097"            # 鉴权服务器监听端口
+  enable-auth-server-log: true        # 是否记录访问日志
+  auth-server-log-path: "./logs/auth.log"  # 访问日志文件路径
+
+  # 固定前置代理 URL 配置（测试功能）
+  # 启用后，302 重定向将使用固定的前置代理 URL，而不是内部路径
+  # 适用场景：简化架构，去除多节点负载均衡，使用单一前置代理
+  #
+  # 示例配置：
+  fixed-proxy-url: "http://183.179.251.164:7777"    # HTTP 代理
+  # fixed-proxy-url: "https://cdn.example.com"        # HTTPS 代理
+  #
+  # 留空或注释则使用默认行为（内部路径重定向）
+  # fixed-proxy-url: ""
+
+# 路径映射配置
+path:
+  # Emby 路径到 Nginx 路径的映射
+  # 格式: emby路径:nginx路径
+  #
+  # 示例：根据你的 Emby 实际挂载配置
+  # 如果 Emby 中：
+  #   - /mnt/google:/media/data
+  #   - /mnt/google1:/media/data1
+  # 那么这里应该配置：
+  #   - /media/data:/video/data
+  #   - /media/data1:/video/data1
+  #
+  # 重要：emby路径 应该是 Emby 容器内的路径（冒号右侧），而不是宿主机路径
+  emby2nginx:
+    - /media/data:/video/data
+    - /media/data1:/video/data1
+    - /media/data2:/video/data2
+    - /media/data3:/video/data3
+    - /media/data4:/video/data4
+    - /media/data_2:/video/data_2
+    - /media/data_3_oumeiguochan:/video/data_3_oumeiguochan
+
+# 缓存配置
+cache:
+  enable: true
+  # 缓存过期时间
+  # 可配置单位: d(天), h(小时), m(分钟), s(秒)
+  expired: 1d
+
+# SSL 配置
+ssl:
+  enable: false       # 是否启用 https
+  # 是否使用单一端口
+  # 启用: 程序会在 8094 端口上监听 https 连接, 不监听 http
+  # 不启用: 程序会在 8094 端口上监听 https 连接, 在 8095 端口上监听 http 连接
+  single-port: false
+  key: testssl.cn.key # 私钥文件名
+  crt: testssl.cn.crt # 证书文件名
+
+# 日志配置
+log:
+  # 是否禁用控制台彩色日志
+  disable-color: false
+
+# Telegram Bot 配置
+telegram:
+  # 是否启用 Telegram Bot
+  enable: false
+  # Bot Token (从 @BotFather 获取)
+  bot-token: "123456:ABC-DEF1234ghIkl-zyx57W2v1u123ew11"
+  # 管理员用户 ID 列表 (可通过 @userinfobot 获取)
+  admin-users:
+    - 123456789
+    - 987654321
+  # 是否使用 Webhook 模式（默认使用轮询模式）
+  webhook-mode: false
+  # Webhook URL (仅 webhook 模式需要)
+  webhook-url: "https://your-domain.com/telegram-webhook"
