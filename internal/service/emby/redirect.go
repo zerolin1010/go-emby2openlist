@@ -58,19 +58,26 @@ func Redirect2NginxLink(c *gin.Context) {
 	}
 	logs.Info("Nginx 路径: %s", nginxPath)
 
-	// 5. 选择健康节点
-	selectedNode := nodeSelector.SelectNode()
-	if selectedNode == nil {
-		checkErr(c, fmt.Errorf("没有可用的健康节点"))
-		return
-	}
-	logs.Info("选择节点: %s (%s)", selectedNode.Name, selectedNode.Host)
-
-	// 6. 获取用户 API Key (用于 Nginx 鉴权)
+	// 5. 获取用户 API Key (用于 Nginx 鉴权)
 	userApiKey := userKeyCache.GetOrFetch(itemInfo.Id, itemInfo.ApiKey)
 
-	// 7. 构建重定向 URL
-	redirectUrl := buildRedirectUrl(selectedNode.Host, nginxPath, userApiKey)
+	// 6. 构建重定向 URL
+	var redirectUrl string
+	fixedProxyURL := getFixedProxyURL()
+	if fixedProxyURL != "" {
+		// 使用固定前置代理 URL（测试模式）
+		redirectUrl = buildRedirectUrl(fixedProxyURL, nginxPath, userApiKey)
+		logs.Info("[主服务] 使用固定前置代理: %s", fixedProxyURL)
+	} else {
+		// 使用节点选择器（原有逻辑）
+		selectedNode := nodeSelector.SelectNode()
+		if selectedNode == nil {
+			checkErr(c, fmt.Errorf("没有可用的健康节点"))
+			return
+		}
+		logs.Info("选择节点: %s (%s)", selectedNode.Name, selectedNode.Host)
+		redirectUrl = buildRedirectUrl(selectedNode.Host, nginxPath, userApiKey)
+	}
 	logs.Success("重定向到: %s", redirectUrl)
 
 	// 8. 设置缓存时间
@@ -157,4 +164,12 @@ func checkErr(c *gin.Context, err error) bool {
 	logs.Error("代理接口失败: %v, 回源处理", err)
 	ProxyOrigin(c)
 	return true
+}
+
+// getFixedProxyURL 获取固定前置代理 URL（测试模式）
+func getFixedProxyURL() string {
+	if config.C == nil || config.C.Auth == nil {
+		return ""
+	}
+	return config.C.Auth.FixedProxyURL
 }
