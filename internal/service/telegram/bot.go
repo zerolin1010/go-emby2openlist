@@ -339,7 +339,7 @@ func (b *Bot) handleBatchAdd(chatID int64, args []string) {
 // handleBatchDelete 批量删除节点
 func (b *Bot) handleBatchDelete(chatID int64, args []string) {
 	if len(args) < 1 {
-		b.reply(chatID, "❌ 参数错误\n用法: /batchdel <name1> <name2> ...\n例如: /batchdel node1 node2")
+		b.reply(chatID, "❌ 参数错误\n用法: /batchdel <name1> <name2> ...\n例如: /batchdel 8.138.199.183 47.92.114.104")
 		return
 	}
 

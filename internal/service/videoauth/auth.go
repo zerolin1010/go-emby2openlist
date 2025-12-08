@@ -86,13 +86,20 @@ func (s *VideoAuthService) HandleVideoAuth(c *gin.Context) {
 	token := s.generateToken(videoPath, apiKey, expiresAt)
 	uid := s.encryptUID(apiKey) // 加密用户标识并缓存映射
 
-	// 5. 记录访问日志
-	logs.Info("[VideoAuth] 鉴权通过，生成临时 URL，用户: %s, 文件: %s, IP: %s, 耗时: %v",
-		maskApiKey(apiKey), videoPath, c.ClientIP(), time.Since(startTime))
+	// 4.5. 获取节点主机信息（用于故障转移时准确识别节点）
+	// 优先使用 Nginx 传递的 X-Node-Host 头，如果不存在则使用 Host 头
+	nodeHost := c.GetHeader("X-Node-Host")
+	if nodeHost == "" {
+		nodeHost = c.Request.Host
+	}
 
-	// 6. 构建重定向 URL
-	redirectURL := fmt.Sprintf("%s?token=%s&expires=%d&uid=%s",
-		videoPath, token, expiresAt, uid)
+	// 5. 记录访问日志
+	logs.Info("[VideoAuth] 鉴权通过，生成临时 URL，用户: %s, 文件: %s, 节点: %s, IP: %s, 耗时: %v",
+		maskApiKey(apiKey), videoPath, nodeHost, c.ClientIP(), time.Since(startTime))
+
+	// 6. 构建重定向 URL（包含节点标识，用于故障转移时准确匹配）
+	redirectURL := fmt.Sprintf("%s?token=%s&expires=%d&uid=%s&_node_host=%s",
+		videoPath, token, expiresAt, uid, url.QueryEscape(nodeHost))
 
 	// 7. 返回 302 重定向
 	c.Redirect(http.StatusFound, redirectURL)
@@ -159,35 +166,81 @@ func (s *VideoAuthService) HandleVerifyToken(c *gin.Context) {
 
 	// 检查当前节点是否健康（实现自动故障转移）
 	if s.healthChecker != nil && s.nodeSelector != nil {
-		// 优先使用 Nginx 传递的 X-Node-Host 头（包含端口号）
-		// 如果不存在，降级使用 Host 头
-		requestHost := c.GetHeader("X-Node-Host")
+		// 优先使用 URL 参数中的 _node_host（在初次鉴权时记录）
+		// 这样即使经过多层 gost 隧道转发改变了 Host 头，也能准确识别原始节点
+		requestHost := c.Query("_node_host")
 		if requestHost == "" {
+			// 降级使用 Nginx 传递的 X-Node-Host 头
+			requestHost = c.GetHeader("X-Node-Host")
+		}
+		if requestHost == "" {
+			// 最后降级使用 Host 头
 			requestHost = c.Request.Host
 		}
+
+		logs.Info("[TokenVerify] 检测到的节点主机: %s (来源: %s)", requestHost,
+			func() string {
+				if c.Query("_node_host") != "" {
+					return "URL参数"
+				} else if c.GetHeader("X-Node-Host") != "" {
+					return "X-Node-Host头"
+				} else {
+					return "Host头"
+				}
+			}())
+
 		isHealthy := s.isNodeHealthy(requestHost)
 		if !isHealthy {
-			// 节点不健康 → 307 重定向到新节点 → 无缝故障转移
+			// 节点不健康 → 执行故障转移
 			logs.Warn("[TokenVerify] 节点不健康，执行故障转移: %s, 路径: %s, IP: %s",
 				requestHost, path, c.ClientIP())
 
-			// 选择新的健康节点
-			newNode := s.nodeSelector.SelectNode()
-			if newNode == nil {
-				logs.Error("[TokenVerify] 没有可用的健康节点，拒绝访问")
-				s.playingSessions.Delete(sessionKey)
-				c.Status(http.StatusServiceUnavailable)
+			// 检测是否来自 Nginx auth_request（通过检查 X-Original-URI 头）
+			// auth_request 调用时 Nginx 会设置这个头
+			isAuthRequest := c.GetHeader("X-Original-URI") != ""
+
+			if isAuthRequest {
+				// 来自 auth_request：不能返回 307（auth_request 不支持重定向）
+				// 返回 403 Forbidden，让 Nginx 拦截并使用 error_page 处理
+				logs.Info("[TokenVerify] 检测到 auth_request 调用，返回 403 触发 Nginx error_page")
+
+				// 选择新的健康节点并在响应头中返回
+				newNode := s.nodeSelector.SelectNode()
+				if newNode == nil {
+					logs.Error("[TokenVerify] 没有可用的健康节点，拒绝访问")
+					s.playingSessions.Delete(sessionKey)
+					c.Status(http.StatusServiceUnavailable)
+					return
+				}
+
+				// 在响应头中返回新节点的 URL（供 Nginx error_page 使用）
+				newRedirectURL := s.buildFailoverURL(newNode.Host, path, apiKey, retryCount+1)
+				c.Header("X-Failover-URL", newRedirectURL)
+				c.Header("X-Failover-Node", newNode.Name)
+				logs.Info("[TokenVerify] auth_request 故障转移: 新节点 %s (%s), URL: %s",
+					newNode.Name, newNode.Host, newRedirectURL)
+
+				c.Status(http.StatusForbidden)
+				return
+			} else {
+				// 直接访问：可以返回 307 重定向
+				newNode := s.nodeSelector.SelectNode()
+				if newNode == nil {
+					logs.Error("[TokenVerify] 没有可用的健康节点，拒绝访问")
+					s.playingSessions.Delete(sessionKey)
+					c.Status(http.StatusServiceUnavailable)
+					return
+				}
+
+				// 重新生成签名 URL（指向新节点）
+				newRedirectURL := s.buildFailoverURL(newNode.Host, path, apiKey, retryCount+1)
+				logs.Info("[TokenVerify] 故障转移到新节点: %s (%s), 重试次数: %d, 新 URL: %s",
+					newNode.Name, newNode.Host, retryCount+1, newRedirectURL)
+
+				// 返回 307 临时重定向（保留 POST/Range 等方法）
+				c.Redirect(http.StatusTemporaryRedirect, newRedirectURL)
 				return
 			}
-
-			// 重新生成签名 URL（指向新节点）
-			newRedirectURL := s.buildFailoverURL(newNode.Host, path, apiKey, retryCount+1)
-			logs.Info("[TokenVerify] 故障转移到新节点: %s (%s), 重试次数: %d, 新 URL: %s",
-				newNode.Name, newNode.Host, retryCount+1, newRedirectURL)
-
-			// 返回 307 临时重定向（保留 POST/Range 等方法）
-			c.Redirect(http.StatusTemporaryRedirect, newRedirectURL)
-			return
 		}
 	}
 
@@ -269,16 +322,16 @@ func (s *VideoAuthService) isNodeHealthy(requestHost string) bool {
 		return true // 健康检查器未初始化，默认认为健康
 	}
 
-	// 获取所有节点
-	allNodes := s.healthChecker.GetAllNodes()
-
 	// 提取请求的 IP 地址（忽略端口号）
 	requestIP := requestHost
 	if host, _, err := net.SplitHostPort(requestHost); err == nil {
 		requestIP = host
 	}
 
-	// 遍历查找匹配的节点
+	logs.Info("[VideoAuth] 检查节点健康状态: requestHost=%s, requestIP=%s", requestHost, requestIP)
+
+	// 1. 先检查健康检查器中的节点（已启用的节点）
+	allNodes := s.healthChecker.GetAllNodes()
 	for _, nodeStatus := range allNodes {
 		// 解析节点的 Host
 		nodeURL, err := url.Parse(nodeStatus.GetHost())
@@ -291,14 +344,15 @@ func (s *VideoAuthService) isNodeHealthy(requestHost string) bool {
 		nodeIP := nodeURL.Hostname()
 
 		// 调试日志
-		logs.Debug("[VideoAuth] 比较节点: requestIP=%s, nodeIP=%s, requestHost=%s, nodeHost=%s",
-			requestIP, nodeIP, requestHost, nodeURL.Host)
+		logs.Info("[VideoAuth] 比较已启用节点: requestIP=%s, nodeIP=%s, nodeName=%s, nodeHost=%s",
+			requestIP, nodeIP, nodeStatus.GetName(), nodeStatus.GetHost())
 
 		// 比较 IP 地址（忽略端口号）
 		if nodeIP == requestIP || nodeURL.Host == requestHost || nodeStatus.GetHost() == requestHost {
-			// 找到匹配的节点，返回健康状态
+			// 找到匹配的已启用节点，返回健康状态
 			isHealthy := nodeStatus.IsHealthy()
-			logs.Info("[VideoAuth] 匹配到节点: %s (%s), 健康状态: %v", nodeStatus.GetName(), nodeStatus.GetHost(), isHealthy)
+			logs.Info("[VideoAuth] 匹配到已启用节点: %s (%s), 健康状态: %v",
+				nodeStatus.GetName(), nodeStatus.GetHost(), isHealthy)
 			if !isHealthy {
 				logs.Warn("[VideoAuth] 节点不健康: %s (%s)", nodeStatus.GetName(), nodeStatus.GetHost())
 			}
@@ -306,8 +360,34 @@ func (s *VideoAuthService) isNodeHealthy(requestHost string) bool {
 		}
 	}
 
-	// 未找到匹配的节点，可能是直接访问 Emby，认为健康
-	logs.Info("[VideoAuth] 未找到匹配的节点: %s, 认为健康", requestHost)
+	// 2. 检查配置中所有节点（包括被禁用的节点）
+	// 如果请求来自被禁用的节点，应该触发故障转移
+	for _, nodeCfg := range config.C.Nodes.List {
+		// 解析配置中的节点 Host
+		nodeURL, err := url.Parse(nodeCfg.Host)
+		if err != nil {
+			continue
+		}
+
+		// 提取节点的 IP 地址
+		nodeIP := nodeURL.Hostname()
+
+		logs.Info("[VideoAuth] 比较配置节点: requestIP=%s, nodeIP=%s, nodeName=%s, enabled=%v",
+			requestIP, nodeIP, nodeCfg.Name, nodeCfg.Enabled)
+
+		// 比较 IP 地址
+		if nodeIP == requestIP || nodeURL.Host == requestHost || nodeCfg.Host == requestHost {
+			if !nodeCfg.Enabled {
+				// 找到匹配的被禁用节点，返回不健康（触发故障转移）
+				logs.Warn("[VideoAuth] 匹配到被禁用的节点: %s (%s), 返回不健康以触发故障转移",
+					nodeCfg.Name, nodeCfg.Host)
+				return false
+			}
+		}
+	}
+
+	// 3. 未找到任何匹配的节点，可能是直接访问 Emby，认为健康
+	logs.Info("[VideoAuth] 未找到匹配的节点: %s, 认为是直接访问 Emby，返回健康", requestHost)
 	return true
 }
 
@@ -353,27 +433,36 @@ func maskApiKey(apiKey string) string {
 }
 
 // buildFailoverURL 构建故障转移 URL
+// 生成指向新节点的 /internal/data URL（带新token）
 func (s *VideoAuthService) buildFailoverURL(nodeHost, internalPath, apiKey string, retryCount int) string {
-	// 1. 解析节点地址
+	// 1. 生成新的临时签名 token
+	expiresAt := time.Now().Add(s.tokenTTL).Unix()
+	token := s.generateToken(internalPath, apiKey, expiresAt)
+	uid := s.encryptUID(apiKey)
+
+	// 2. 解析节点地址
 	u, err := url.Parse(nodeHost)
 	if err != nil {
 		logs.Error("[Failover] 解析节点地址失败: %v", err)
 		return ""
 	}
 
-	// 2. 将 /internal/dataX/... 转换为 /video/dataX/...
-	publicPath := strings.Replace(internalPath, "/internal/", "/video/", 1)
+	// 3. 设置路径为 internal 路径
+	u.Path = internalPath
 
-	// 3. 设置路径
-	u.Path = publicPath
-
-	// 4. 添加 api_key 和 _retry 参数
+	// 4. 添加 token, expires, uid, _node_host 参数
 	q := u.Query()
-	q.Set("api_key", apiKey)
+	q.Set("token", token)
+	q.Set("expires", fmt.Sprintf("%d", expiresAt))
+	q.Set("uid", uid)
+	// 添加节点主机信息，用于后续请求时准确识别节点
+	q.Set("_node_host", u.Host)
 	if retryCount > 0 {
 		q.Set("_retry", fmt.Sprintf("%d", retryCount))
 	}
 	u.RawQuery = q.Encode()
 
-	return u.String()
+	finalURL := u.String()
+	logs.Info("[Failover] 故障转移URL: %s (新节点 %s)", finalURL, nodeHost)
+	return finalURL
 }

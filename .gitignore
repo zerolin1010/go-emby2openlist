@@ -5,4 +5,4 @@ ssl/*.key
 ssl/*.pem
 .DS_Store
 dist
-log.txt
+log.txtlogs/

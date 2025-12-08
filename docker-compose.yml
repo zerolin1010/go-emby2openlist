@@ -9,11 +9,12 @@ services:
       - GIN_MODE=release
     container_name: go-emby2openlist
     restart: always
+    network_mode: "host"  # 使用 host 网络模式以访问 127.0.0.1 的 Emby 服务
     volumes:
       - ./config.yml:/app/config.yml
       - ./ssl:/app/ssl
       - ./logs:/app/logs
-    ports:
-      - 8095:8095 # http
-      - 8094:8094 # https
-      - 8097:8097 # auth server
+    # ports 配置在 host 模式下不需要
+    # - 8095:8095 # http
+    # - 8094:8094 # https
+    # - 8097:8097 # auth server

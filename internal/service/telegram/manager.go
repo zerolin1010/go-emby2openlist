@@ -6,8 +6,8 @@ import (
 	"fmt"
 	"net/url"
 	"strconv"
+	"strings"
 	"sync"
-	"time"
 
 	"github.com/AmbitiousJun/go-emby2openlist/v2/internal/config"
 	"github.com/AmbitiousJun/go-emby2openlist/v2/internal/service/node"
@@ -72,31 +72,39 @@ func (nm *NodeManager) AddNode(newNode config.Node) error {
 }
 
 // generateNodeName 自动生成节点名称
-// 格式: node-{host简写}-{序号}
-// 例如: node-192168-1, node-example-1
+// 直接使用IP地址作为节点名称
+// 例如: http://8.138.199.183:46621 -> 8.138.199.183
 func (nm *NodeManager) generateNodeName(host string) string {
-	// 提取主机名或IP的简短标识
-	shortID := nm.extractHostID(host)
-
-	// 查找可用的序号
-	for i := 1; i <= 999; i++ {
-		name := fmt.Sprintf("node-%s-%d", shortID, i)
-		// 检查是否已存在
-		exists := false
-		for _, node := range config.C.Nodes.List {
-			if node.Name == name {
-				exists = true
-				break
-			}
+	// 直接使用IP地址作为节点名称
+	// 例如: http://8.138.199.183:46621 -> 8.138.199.183
+	u, err := url.Parse(host)
+	if err != nil {
+		// 解析失败，尝试直接提取IP（例如: 8.138.199.183:46621 -> 8.138.199.183）
+		if strings.Contains(host, ":") {
+			parts := strings.Split(host, ":")
+			return parts[0]
 		}
-		if !exists {
-			return name
-		}
+		// 如果都失败，使用host本身
+		return host
 	}
 
-	// 如果前999个都被占用，使用时间戳+哈希
-	hash := md5.Sum([]byte(host + strconv.FormatInt(time.Now().UnixNano(), 10)))
-	return "node-" + hex.EncodeToString(hash[:])[:8]
+	// 提取hostname（IP地址）
+	hostname := u.Hostname()
+	if hostname == "" {
+		// 如果解析失败，尝试从Host字段获取
+		if u.Host != "" {
+			if strings.Contains(u.Host, ":") {
+				parts := strings.Split(u.Host, ":")
+				return parts[0]
+			}
+			return u.Host
+		}
+		// 最后使用MD5作为fallback
+		hash := md5.Sum([]byte(host))
+		return hex.EncodeToString(hash[:])[:8]
+	}
+
+	return hostname
 }
 
 // extractHostID 从 host URL 中提取简短标识
